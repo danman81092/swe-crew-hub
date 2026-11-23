@@ -76,6 +76,7 @@ button:focus-visible{outline:2px solid #3faeff;outline-offset:2px}
 
 .excavator-icon{display:inline-block;vertical-align:middle;width:38px;height:32px;color:inherit}
 .nav .excavator-icon{width:25px;height:22px}
+.approval-checkbox{display:inline-flex;align-items:center;gap:8px;margin:0}.approval-checkbox input{appearance:auto;width:22px;min-height:22px;margin:6px;padding:0}
 </style></head><body><main class="app"><header class="top"><div class="brand"><img src="/logo.jpg" alt="South West Earthworks logo"><div><div class="eyebrow">SOUTH WEST EARTHWORKS</div><h1>CREW HUB</h1></div></div><div class="header-actions"><details id="logout" style="display:none;position:relative"><summary class="alt account-identity" style="cursor:pointer;padding:8px"><span class="account-avatar" aria-hidden="true">♙</span><span class="account-person"><strong id="headerUserName">My Account</strong><small id="headerUserRole">Crew Member</small></span><span class="account-chevron" aria-hidden="true">⌄</span></summary><div class="card account-dropdown"><button class="alt" onclick="accountPage()">⚙ <span>Account details / PIN</span></button><button class="alt" onclick="personalDetails()">♙ <span>My personal information</span></button><button class="alt" id="themeToggle" onclick="toggleTheme()" aria-label="Switch appearance">☾ Dark</button><div class="account-menu-divider"></div><button class="alt account-signout" onclick="logout()">⇥ <span>Sign out</span></button></div></details></div></header><div id="screen"></div></main><nav class="nav hidden" id="nav"><button onclick="go('home')" id="n-home"> <b>⌂</b>Home</button><button onclick="go('timesheet')" id="n-timesheet"><b>◷</b>Timesheet</button><button onclick="go('docket')" id="n-docket"><b>▤</b>Plant & Materials</button><button onclick="go('history')" id="n-history"><b>◴</b>History</button><button onclick="go('office')" id="n-office" class="hidden"><b>▦</b>Office</button></nav><script>
 
 function applyTheme(mode){document.documentElement.dataset.theme=mode;document.querySelector('meta[name="theme-color"]').content=mode==='dark'?'#071326':'#f4f7fb';document.getElementById('themeToggle').textContent=mode==='dark'?'☀ Light mode':'☾ Dark mode';try{localStorage.setItem('swe-theme',mode)}catch{}}
@@ -272,7 +273,16 @@ function timesheetDayView(day,week,index){
 function viewRecord(id){let r=records.find(x=>x.id===id);let d=r.data;let content=r.type==='timesheet'?`<p>Total: <b>${d.days.reduce((s,x)=>s+hours(x),0).toFixed(2)} hours</b></p>${d.days.map((day,index)=>timesheetDayView(day,recWeek(r),index)).join('')}${d.signature?`<p>${d.adminCorrected?'Original employee signature — hours subsequently corrected by management':'Signed:'}</p><img style="width:100%;max-width:380px;background:white;border-radius:12px" src="${d.signature}">`:''}`:`<p>Job/Project/Name: ${esc(d.job)}</p><h3>Description of works</h3><div style="white-space:pre-wrap">${esc(d.description||"Not recorded")}</div><h3>Machines</h3>${d.machines.map(x=>`<p>${esc(x.name)}: ${x.qty} hours</p>`).join('')}<h3>Materials</h3>${d.materials.map(x=>`<p>${esc(x.name)}: ${x.qty} ${esc(x.unit)}</p>`).join('')}<p>${esc(d.notes)}</p>${cartageView(d.loads)}${photoView(d.photos)}`;$('#screen').innerHTML=`<section class="card"><button class="alt" onclick="go('${me.role==='manager'?(page==='approvals'?'approvals':'office'):'history'}')">← Back</button><h2>${esc(r.employee)} · ${esc(r.type)}</h2><span class="pill">${esc(r.status)}</span>${content}<div class="actions"><button class="alt" onclick="audit(${id})">View change history</button></div><div id="audit"></div></section>`}
 async function audit(id){let x=await api('/audit/'+id);$('#audit').innerHTML=x.map(a=>`<div class="line muted">${esc(a.at)} · ${esc(a.actor)} · ${esc(a.action)} ${esc(a.details)}</div>`).join('')}
 async function submitRecord(id){try{await post('/records/'+id+'/submit',{});await refresh();go('history');notify('Submitted')}catch(e){notify(e.message,true)}}
-async function review(id,status){try{await post('/records/'+id+'/review',{status});await refresh();if(page==='approvals')pendingTimesheets(false);else office();notify('Record '+status)}catch(e){notify(e.message,true)}}
+async function review(id,status){
+  const queue=$('#pending-timesheets');
+  if(queue)return reviewQueuedTimesheets([id],status);
+  try{
+    await post('/records/'+id+'/review',{status});
+    await refresh();
+    office();
+    notify('Record '+status);
+  }catch(e){notify(e.message,true)}
+}
 
 let officeFolder=null,officeUser=null,officeWeek=null,officeJob=null,officeMode='people',activeDocket=null;
 const weekOf=v=>{let d=new Date(v+'T12:00:00Z');if(isNaN(d))return monday();d.setUTCDate(d.getUTCDate()-(d.getUTCDay()+6)%7);return d.toISOString().slice(0,10)};
@@ -351,8 +361,10 @@ async function pendingTimesheets(loadLatest=true){
   $('#screen').innerHTML=`<section class="card">
     <button class="alt" onclick="go('home')">← Dashboard</button>
     <h2>Timesheets awaiting approval</h2>
-    <button class="alt" onclick="pendingTimesheets()">Refresh</button>
-    <div id="pending-timesheets" aria-live="polite"></div>
+    <fieldset id="approval-actions" style="min-width:0;border:0;padding:0;margin:0">
+      <button class="alt" onclick="pendingTimesheets()">Refresh</button>
+      <div id="pending-timesheets"></div>
+    </fieldset>
   </section>`;
   const list=$('#pending-timesheets');
   if(loadLatest){
@@ -366,14 +378,62 @@ async function pendingTimesheets(loadLatest=true){
       return;
     }
   }
-  list.innerHTML=records.filter(r=>r.type==='timesheet'&&r.status==='submitted').map(officeRecord).join('')||'<p>All caught up.</p>';
+  const pending=records.filter(r=>r.type==='timesheet'&&r.status==='submitted');
+  if(!pending.length){
+    list.innerHTML='<p>All caught up.</p>';
+    return;
+  }
+  list.innerHTML=`<div class="actions">
+    <label class="approval-checkbox"><input type="checkbox" id="select-all-timesheets" onchange="selectAllTimesheets(this.checked)"> Select all</label>
+    <button id="approve-selected-timesheets" onclick="approveSelectedTimesheets()" disabled>Approve selected</button>
+  </div>`+pending.map(r=>officeRecord(r,true)).join('');
+}
+
+function selectAllTimesheets(checked){
+  document.querySelectorAll('.timesheet-selection').forEach(box=>{box.checked=checked});
+  updateTimesheetSelection();
+}
+
+function updateTimesheetSelection(){
+  const boxes=[...document.querySelectorAll('.timesheet-selection')];
+  const count=boxes.filter(box=>box.checked).length;
+  const selectAll=$('#select-all-timesheets');
+  selectAll.checked=count===boxes.length;
+  selectAll.indeterminate=count>0&&count<boxes.length;
+  const button=$('#approve-selected-timesheets');
+  button.disabled=count===0;
+  button.textContent=count?'Approve selected ('+count+')':'Approve selected';
+}
+
+function approveSelectedTimesheets(){
+  const ids=[...document.querySelectorAll('.timesheet-selection:checked')].map(box=>Number(box.value));
+  if(ids.length) return reviewQueuedTimesheets(ids,'approved');
+}
+
+async function reviewQueuedTimesheets(ids,status){
+  const actions=$('#approval-actions');
+  if(me.role!=='manager'||!actions||actions.disabled)return;
+  actions.disabled=true;
+  let completed=0;
+  const errors=[];
+  for(const id of ids){
+    try{
+      await post('/records/'+id+'/review',{status});
+      const record=records.find(r=>r.id===id);
+      if(record)record.status=status;
+      completed++;
+    }catch(e){errors.push(e.message)}
+  }
+  if(actions.isConnected)await pendingTimesheets(errors.length>0);
+  const result=completed+' '+(completed===1?'timesheet':'timesheets')+' '+status;
+  notify(errors.length?result+'. '+errors.length+' could not be updated. '+errors[0]:result,errors.length>0);
 }
 
 
 function folderMatch(r,type){return type==='archive'?r.type==='timesheet'&&!!r.data.archivedAt:type===r.type&&!r.data.archivedAt}
 async function archiveTimesheet(id,restore=false){if(!confirm(restore?'Restore this timesheet to active records?':'Confirm payroll has been actioned and archive this timesheet?'))return;try{await post('/records/'+id+'/archive',{restore});await refresh();office();notify(restore?'Timesheet restored':'Timesheet actioned and archived')}catch(e){notify(e.message,true)}}
 
-function officeRecord(r){return '<div class="line"><div class="row"><b>'+esc(r.employee)+' · '+esc(r.type==='timesheet'?'Timesheet':r.data.job)+' #'+r.id+'</b><span class="pill">'+esc(r.data.archivedAt?'archived':r.status)+'</span></div><p>'+esc(r.date)+'</p><div class="actions"><button class="alt" onclick="viewRecord('+r.id+')">View</button>'+(r.type==='docket'&&['submitted','approved'].includes(r.status)?'<button class="alt" onclick="openDocket('+r.id+')">Edit docket</button>':'')+(r.type==='timesheet'&&!r.data.archivedAt&&['submitted','approved','returned'].includes(r.status)?'<button class="alt" onclick="adminTimesheet('+r.id+')">Edit timesheet</button>':'')+(r.type==='timesheet'&&r.status==='approved'?(r.data.archivedAt?'<button class="alt" onclick="archiveTimesheet('+r.id+',true)">Restore</button>':'<button onclick="archiveTimesheet('+r.id+')">Actioned &amp; archive</button>'):'')+(r.status==='submitted'?'<button onclick="review('+r.id+',\'approved\')">Approve</button><button class="danger" onclick="review('+r.id+',\'returned\')">Return</button>':'')+'</div></div>'}
+function officeRecord(r,selectable=false){return '<div class="line"><div class="row">'+(selectable===true?'<label class="approval-checkbox"><input type="checkbox" class="timesheet-selection" value="'+r.id+'" onchange="updateTimesheetSelection()" aria-label="Select timesheet '+r.id+' for '+esc(r.employee)+'"></label>':'')+'<b>'+esc(r.employee)+' · '+esc(r.type==='timesheet'?'Timesheet':r.data.job)+' #'+r.id+'</b><span class="pill">'+esc(r.data.archivedAt?'archived':r.status)+'</span></div><p>'+esc(r.date)+'</p><div class="actions"><button class="alt" onclick="viewRecord('+r.id+')">View</button>'+(r.type==='docket'&&['submitted','approved'].includes(r.status)?'<button class="alt" onclick="openDocket('+r.id+')">Edit docket</button>':'')+(r.type==='timesheet'&&!r.data.archivedAt&&['submitted','approved','returned'].includes(r.status)?'<button class="alt" onclick="adminTimesheet('+r.id+')">Edit timesheet</button>':'')+(r.type==='timesheet'&&r.status==='approved'?(r.data.archivedAt?'<button class="alt" onclick="archiveTimesheet('+r.id+',true)">Restore</button>':'<button onclick="archiveTimesheet('+r.id+')">Actioned &amp; archive</button>'):'')+(r.status==='submitted'?'<button onclick="review('+r.id+',\'approved\')">Approve</button><button class="danger" onclick="review('+r.id+',\'returned\')">Return</button>':'')+'</div></div>'}
 function payroll(){let w=prompt('Week commencing Monday (YYYY-MM-DD)',officeWeek||weekOf(today()));if(!w||weekOf(w)!==w)return;let q=x=>'"'+String(x??'').replace(/^[=+@-]/,"'(async()=>{try{me=await api('/me');").replaceAll('"','""')+'"';let rows=[['Employee','Week','Record','Hours'],...records.filter(r=>r.type==='timesheet'&&r.status==='approved'&&!r.data.archivedAt&&recWeek(r)===w).map(r=>[r.employee,w,r.id,r.data.days.reduce((a,d)=>a+hours(d),0).toFixed(2)])];let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([rows.map(r=>r.map(q).join(',')).join('\r\n')],{type:'text/csv'}));a.download='SWE-payroll-'+w+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
 
 
