@@ -88,6 +88,38 @@ app.post('/api/plant-services',auth,manager,(req,res)=>{try{let {equipment_id,ho
 db.exec("CREATE TABLE IF NOT EXISTS site_forms(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,assigned_by INTEGER NOT NULL,title TEXT NOT NULL,job TEXT, instructions TEXT,filename TEXT NOT NULL,pdf TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,completed_at TEXT,response TEXT,signature TEXT,returned_pdf TEXT,FOREIGN KEY(user_id) REFERENCES users(id))");
 function validFormPdf(p){return typeof p==='string'&&p.length<=4000000&&/^JVBERi0[A-Za-z0-9+/=]+$/.test(p)}
 function formAccess(req,res,next){res.set('Cache-Control','no-store');let row=db.prepare('SELECT * FROM site_forms WHERE id=?').get(Number(req.params.id));if(!row||(req.user.role!=='manager'&&row.user_id!==req.user.id))return res.status(404).json({error:'Form not found'});req.siteForm=row;next()}
+db.exec(`CREATE TABLE IF NOT EXISTS swms_documents (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  pdf TEXT NOT NULL,
+  uploaded_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`);
+
+app.get('/api/swms',auth,(req,res)=>{
+  res.set('Cache-Control','no-store');
+  res.json(db.prepare('SELECT id,title,created_at FROM swms_documents ORDER BY title COLLATE NOCASE,id DESC').all());
+});
+
+app.post('/api/swms',auth,manager,(req,res)=>{
+  try{
+    const {title,pdf}=req.body||{};
+    if(typeof title!=='string'||!title.trim()||title.length>200||!validFormPdf(pdf))throw Error('Enter a title and choose a PDF up to 3 MB.');
+    const saved=db.prepare('INSERT INTO swms_documents(title,pdf,uploaded_by) VALUES (?,?,?)').run(title.trim(),pdf,req.user.id);
+    res.status(201).json({id:saved.lastInsertRowid});
+  }catch(error){fail(res,error)}
+});
+
+app.get('/api/swms/:id/file',auth,(req,res)=>{
+  const document=db.prepare('SELECT title,pdf FROM swms_documents WHERE id=?').get(req.params.id);
+  if(!document)return res.sendStatus(404);
+  const filename=document.title.replace(/[^a-z0-9 _-]/gi,'').trim().slice(0,100)||('SWMS-'+req.params.id);
+  res.set({'Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'"});
+  if(req.query.download==='1')res.attachment(filename+'.pdf');
+  else res.set('Content-Disposition','inline');
+  res.type('application/pdf').send(Buffer.from(document.pdf,'base64'));
+});
+
 app.get('/api/site-forms',auth,(req,res)=>{res.set('Cache-Control','no-store');let fields='SELECT id,user_id,title,job,instructions,filename,created_at,completed_at,response,CASE WHEN returned_pdf IS NULL OR returned_pdf=\'\' THEN 0 ELSE 1 END has_return FROM site_forms';res.json(req.user.role==='manager'?db.prepare(fields+' ORDER BY id DESC').all():db.prepare(fields+' WHERE user_id=? ORDER BY id DESC').all(req.user.id))});
 app.post('/api/site-forms',auth,manager,(req,res)=>{try{const {userId,title,job='',instructions='',filename,pdf}=req.body;if(!db.prepare("SELECT id FROM users WHERE id=? AND active=1 AND role='employee'").get(userId)||typeof title!=='string'||!title.trim()||title.length>200||typeof job!=='string'||job.length>200||typeof instructions!=='string'||instructions.length>2000||typeof filename!=='string'||filename.length>200||!validFormPdf(pdf))throw Error('Select an active employee and PDF under 3 MB');let x=db.prepare('INSERT INTO site_forms(user_id,assigned_by,title,job,instructions,filename,pdf) VALUES (?,?,?,?,?,?,?)').run(userId,req.user.id,title.trim(),job,instructions,filename,pdf);res.json({id:x.lastInsertRowid})}catch(e){fail(res,e)}});
 app.get('/api/site-forms/:id/file',auth,formAccess,(req,res)=>{let f=req.siteForm,p=req.query.returned==='1'?f.returned_pdf:f.pdf;if(!p)return res.sendStatus(404);res.type('application/pdf').attachment('site-form-'+f.id+(req.query.returned==='1'?'-completed':'')+'.pdf').send(Buffer.from(p,'base64'))});
