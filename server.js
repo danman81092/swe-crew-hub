@@ -93,12 +93,17 @@ db.exec(`CREATE TABLE IF NOT EXISTS swms_documents (
   title TEXT NOT NULL,
   pdf TEXT NOT NULL,
   uploaded_by INTEGER NOT NULL REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted_at TEXT
 )`);
+
+if(!db.pragma('table_info(swms_documents)').some(column=>column.name==='deleted_at')){
+  db.exec('ALTER TABLE swms_documents ADD COLUMN deleted_at TEXT');
+}
 
 app.get('/api/swms',auth,(req,res)=>{
   res.set('Cache-Control','no-store');
-  res.json(db.prepare('SELECT id,title,created_at FROM swms_documents ORDER BY title COLLATE NOCASE,id DESC').all());
+  res.json(db.prepare('SELECT id,title,created_at FROM swms_documents WHERE deleted_at IS NULL ORDER BY title COLLATE NOCASE,id DESC').all());
 });
 
 app.post('/api/swms',auth,manager,(req,res)=>{
@@ -110,8 +115,16 @@ app.post('/api/swms',auth,manager,(req,res)=>{
   }catch(error){fail(res,error)}
 });
 
+app.delete('/api/swms/:id',auth,manager,(req,res)=>{
+  const id=Number(req.params.id);
+  if(!Number.isSafeInteger(id)||id<=0)return res.sendStatus(404);
+  const result=db.prepare('UPDATE swms_documents SET deleted_at=CURRENT_TIMESTAMP WHERE id=? AND deleted_at IS NULL').run(id);
+  if(!result.changes&&!db.prepare('SELECT id FROM swms_documents WHERE id=?').get(id))return res.sendStatus(404);
+  res.json({ok:true});
+});
+
 app.get('/api/swms/:id/file',auth,(req,res)=>{
-  const document=db.prepare('SELECT title,pdf FROM swms_documents WHERE id=?').get(req.params.id);
+  const document=db.prepare('SELECT title,pdf FROM swms_documents WHERE id=? AND deleted_at IS NULL').get(req.params.id);
   if(!document)return res.sendStatus(404);
   const filename=document.title.replace(/[^a-z0-9 _-]/gi,'').trim().slice(0,100)||('SWMS-'+req.params.id);
   res.set({'Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'"});

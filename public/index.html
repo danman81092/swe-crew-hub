@@ -404,8 +404,20 @@ async function swmsPage(){
     if(!list.isConnected)return;
     list.innerHTML=documents.map(document=>`<div class="line"><b>${esc(document.title)}</b>
       <div class="actions"><a href="/api/swms/${document.id}/file" target="_blank" rel="noopener">Open PDF</a>
-      <a href="/api/swms/${document.id}/file?download=1">Download PDF</a></div></div>`).join('')||'<p>No SWMS uploaded yet.</p>';
+      <a href="/api/swms/${document.id}/file?download=1">Download PDF</a>
+      ${me.role==='manager'?`<button type="button" class="danger" onclick="deleteSwms(this,${document.id})">Delete</button>`:''}</div></div>`).join('')||'<p>No SWMS uploaded yet.</p>';
   }catch(error){if(list.isConnected)list.textContent=error.message}
+}
+
+async function deleteSwms(button,id){
+  const title=button.closest('.line').querySelector('b').textContent;
+  if(!confirm('Delete "'+title+'" from the SWMS folder? It will no longer be available to the crew.'))return;
+  button.disabled=true;
+  try{
+    await api('/swms/'+id,{method:'DELETE'});
+    if(button.isConnected){await swmsPage();notify('SWMS deleted')}
+  }catch(error){if(button.isConnected)notify(error.message,true)}
+  finally{button.disabled=false}
 }
 
 async function readFormPdf(file){if(!file||file.size>3000000)throw Error('Choose a PDF under 3 MB');let b=new Uint8Array(await file.arrayBuffer());if(String.fromCharCode(...b.slice(0,5))!=='%PDF-')throw Error('PDF files only');let out='';for(let i=0;i<b.length;i+=16384)out+=String.fromCharCode(...b.subarray(i,i+16384));return btoa(out)}
