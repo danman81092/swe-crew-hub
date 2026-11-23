@@ -88,7 +88,13 @@ const api=async(url,opts={})=>{const r=await fetch('/api'+url,{headers:{'Content
 const post=(url,data)=>api(url,{method:'POST',body:JSON.stringify(data)});
 const today=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Australia/Melbourne'});
 const monday=()=>{let d=new Date(),dow=(d.getDay()+6)%7;d.setDate(d.getDate()-dow);return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-')};
-const hours=d=>{if(d.kind!=='work'||!d.start||!d.finish)return 0;let a=d.start.split(':').map(Number),b=d.finish.split(':').map(Number);return Math.max(0,((b[0]*60+b[1])-(a[0]*60+a[1]))/60-(+d.break||0))};
+const shiftHours=d=>{
+  if(d.kind!=='work'||!d.start||!d.finish)return 0;
+  const [startHour,startMinute]=d.start.split(':').map(Number);
+  const [finishHour,finishMinute]=d.finish.split(':').map(Number);
+  return ((finishHour-startHour)*60+finishMinute-startMinute)/60;
+};
+const hours=d=>d.kind==='work'&&d.start&&d.finish?Math.max(0,shiftHours(d)-(+d.break||0)):0;
 const select=(kind,extra='')=>`<select ${extra}>${catalog.filter(c=>c.kind===kind).map(c=>`<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')}</select>`;
 async function refresh(){records=await api('/records');catalog=await api('/catalog');if(me.role==='manager')users=await api('/users')}
 function notify(s,error=false){let n=document.createElement('div');n.className='notice'+(error?' bad':'');n.textContent=s;$('#screen').prepend(n);setTimeout(()=>n.remove(),4500)}
@@ -247,7 +253,23 @@ async function submissionsHistory(category=historyCategory){
  }
  $('#screen').innerHTML='<section class="card"><h2>History</h2><p class="muted">Find your previous timesheets, job dockets and site forms.</p>'+tabsHtml+content+'</section>';
 }
-function viewRecord(id){let r=records.find(x=>x.id===id);let d=r.data;let content=r.type==='timesheet'?`<p>Total: <b>${d.days.reduce((s,x)=>s+hours(x),0).toFixed(2)} hours</b></p>${d.days.map((x,i)=>`<div class="line"><b>${['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][i]} · ${hours(x).toFixed(2)} hrs</b><p>${esc(x.kind)} · ${esc(clock12(x.start))}–${esc(clock12(x.finish))} · break ${esc(x.break)}</p><div style="white-space:pre-wrap">${esc(x.description)}</div></div>`).join('')}${d.signature?`<p>${d.adminCorrected?'Original employee signature — hours subsequently corrected by management':'Signed:'}</p><img style="width:100%;max-width:380px;background:white;border-radius:12px" src="${d.signature}">`:''}`:`<p>Job/Project/Name: ${esc(d.job)}</p><h3>Description of works</h3><div style="white-space:pre-wrap">${esc(d.description||"Not recorded")}</div><h3>Machines</h3>${d.machines.map(x=>`<p>${esc(x.name)}: ${x.qty} hours</p>`).join('')}<h3>Materials</h3>${d.materials.map(x=>`<p>${esc(x.name)}: ${x.qty} ${esc(x.unit)}</p>`).join('')}<p>${esc(d.notes)}</p>${cartageView(d.loads)}${photoView(d.photos)}`;$('#screen').innerHTML=`<section class="card"><button class="alt" onclick="go('${me.role==='manager'?(page==='approvals'?'approvals':'office'):'history'}')">← Back</button><h2>${esc(r.employee)} · ${esc(r.type)}</h2><span class="pill">${esc(r.status)}</span>${content}<div class="actions"><button class="alt" onclick="audit(${id})">View change history</button></div><div id="audit"></div></section>`}
+function timesheetDayView(day,week,index){
+  const date=new Date(week+'T12:00:00Z');
+  date.setUTCDate(date.getUTCDate()+index);
+  const label=date.toLocaleDateString('en-AU',{
+    weekday:'long',day:'numeric',month:'short',year:'numeric',timeZone:'UTC'
+  });
+  const hasShift=day.kind==='work'&&day.start&&day.finish;
+  return `<div class="line">
+    <b>${esc(label)} · ${hours(day).toFixed(2)} hrs</b>
+    <p>${esc(day.kind)}${hasShift?` · ${esc(clock12(day.start))}–${esc(clock12(day.finish))}`:''}</p>
+    ${hasShift?`<p>Before break deduction: ${Math.max(0,shiftHours(day)).toFixed(2)} hrs<br>
+      Break deducted: ${(+day.break||0).toFixed(2)} hrs<br>
+      <strong>After break deduction: ${hours(day).toFixed(2)} hrs</strong></p>`:''}
+    <div style="white-space:pre-wrap">${esc(day.description)}</div>
+  </div>`;
+}
+function viewRecord(id){let r=records.find(x=>x.id===id);let d=r.data;let content=r.type==='timesheet'?`<p>Total: <b>${d.days.reduce((s,x)=>s+hours(x),0).toFixed(2)} hours</b></p>${d.days.map((day,index)=>timesheetDayView(day,recWeek(r),index)).join('')}${d.signature?`<p>${d.adminCorrected?'Original employee signature — hours subsequently corrected by management':'Signed:'}</p><img style="width:100%;max-width:380px;background:white;border-radius:12px" src="${d.signature}">`:''}`:`<p>Job/Project/Name: ${esc(d.job)}</p><h3>Description of works</h3><div style="white-space:pre-wrap">${esc(d.description||"Not recorded")}</div><h3>Machines</h3>${d.machines.map(x=>`<p>${esc(x.name)}: ${x.qty} hours</p>`).join('')}<h3>Materials</h3>${d.materials.map(x=>`<p>${esc(x.name)}: ${x.qty} ${esc(x.unit)}</p>`).join('')}<p>${esc(d.notes)}</p>${cartageView(d.loads)}${photoView(d.photos)}`;$('#screen').innerHTML=`<section class="card"><button class="alt" onclick="go('${me.role==='manager'?(page==='approvals'?'approvals':'office'):'history'}')">← Back</button><h2>${esc(r.employee)} · ${esc(r.type)}</h2><span class="pill">${esc(r.status)}</span>${content}<div class="actions"><button class="alt" onclick="audit(${id})">View change history</button></div><div id="audit"></div></section>`}
 async function audit(id){let x=await api('/audit/'+id);$('#audit').innerHTML=x.map(a=>`<div class="line muted">${esc(a.at)} · ${esc(a.actor)} · ${esc(a.action)} ${esc(a.details)}</div>`).join('')}
 async function submitRecord(id){try{await post('/records/'+id+'/submit',{});await refresh();go('history');notify('Submitted')}catch(e){notify(e.message,true)}}
 async function review(id,status){try{await post('/records/'+id+'/review',{status});await refresh();if(page==='approvals')pendingTimesheets(false);else office();notify('Record '+status)}catch(e){notify(e.message,true)}}
