@@ -131,20 +131,45 @@ app.post('/api/jobs/:id/lifecycle',auth,manager,(req,res)=>{try{let id=Number(re
 app.post('/api/costing/job',auth,manager,(req,res)=>{try{let b=req.body,name=String(b.name||'').trim(),client=String(b.client||'').trim(),budget=costNumber(b.budget),margin=costNumber(b.margin),day=costDate(b.start_day);if(!name||!client||name.length>200||client.length>200||margin>100)throw Error('Invalid project details');let id=db.transaction(()=>{if(b.id){let j=db.prepare('SELECT * FROM costing_jobs WHERE id=?').get(b.id);if(!j)throw Error('Unknown job');db.prepare('UPDATE costing_jobs SET client=?,budget=?,margin=?,start_day=? WHERE id=?').run(client,budget,margin,day,j.id);return j.id}db.prepare("INSERT OR IGNORE INTO catalog(kind,name,active) VALUES ('job',?,1)").run(name);let c=db.prepare("SELECT id FROM catalog WHERE kind='job' AND name=?").get(name);db.prepare('UPDATE catalog SET active=1 WHERE id=?').run(c.id);return db.prepare('INSERT INTO costing_jobs(catalog_id,client,budget,margin,start_day) VALUES (?,?,?,?,?)').run(c.id,client,budget,margin,day).lastInsertRowid})();res.json({id})}catch(e){fail(res,e)}});
 app.post('/api/costing/rate',auth,manager,(req,res)=>{try{let b=req.body,k=b.kind,n=costNorm(b.name),u=costUnit(b.unit);if(!['machine','material'].includes(k)||!n||!u||n.length>200)throw Error('Enter item and unit');db.prepare('INSERT INTO costing_rates VALUES (?,?,?,?) ON CONFLICT(kind,name,unit) DO UPDATE SET rate=excluded.rate').run(k,n,u,costNumber(b.rate));res.json({ok:true})}catch(e){fail(res,e)}});
 app.post('/api/costing/extra',auth,manager,(req,res)=>{try{let b=req.body,label=String(b.label||'').trim();if(!label||!db.prepare('SELECT id FROM costing_jobs WHERE id=?').get(b.job_id))throw Error('Invalid cost');db.prepare('INSERT INTO costing_extras(job_id,day,label,amount) VALUES (?,?,?,?)').run(b.job_id,costDate(b.day),label.slice(0,200),costNumber(b.amount));res.json({ok:true})}catch(e){fail(res,e)}});
-function docketMachineHours(items){
+function docketQuantities(items,kind,defaultUnit){
   return items.map(item=>{
     const entries=Array.isArray(item.daily)&&item.daily.length?item.daily.slice(0,7):[item.qty];
     const qty=entries.reduce((total,value)=>{
       const hours=Number(value);
       return Number.isFinite(hours)&&hours>0?total+hours:total;
     },0);
-    return {kind:'machine',name:item.name,unit:'hours',qty};
-  }).filter(item=>item.qty>0);
+    return {kind,name:item.name,unit:costUnit(item.unit||defaultUnit),qty};
+  }).filter(item=>costNorm(item.name)&&item.qty>0);
 }
-app.get('/api/costing/job/:id',auth,manager,(req,res)=>{try{res.set('Cache-Control','no-store');let j=db.prepare('SELECT j.*,c.name FROM costing_jobs j JOIN catalog c ON c.id=j.catalog_id WHERE j.id=?').get(req.params.id);if(!j)throw Error('Job not found');let rates=new Map(db.prepare('SELECT * FROM costing_rates').all().map(r=>[JSON.stringify([r.kind,r.name,r.unit]),r.rate])),lines=[],machineHours=[];for(let r of db.prepare("SELECT id,date,week,status,data FROM records WHERE type='docket'").all()){let d=JSON.parse(r.data);const matchesName=costNorm(d.job)===costNorm(j.name);
+function docketLoadCost(load,r,rates){
+  const name=String(load.material||'').trim();
+  const tonnes=Number(load.tonnes);
+  const day=String(load.date||'');
+  if(!name||!Number.isFinite(tonnes)||tonnes<=0||!/^\d{4}-\d{2}-\d{2}$/.test(day))return null;
+  const enteredRate=load.rate==null||String(load.rate).trim()===''?NaN:Number(load.rate);
+  const hasRate=Number.isFinite(enteredRate)&&enteredRate>=0;
+  const unit=hasRate&&load.rateUnit==='m3'?'m³':'tonnes';
+  const qty=unit==='m³'?Number(load.volumeM3):tonnes;
+  const rate=hasRate?enteredRate:rates.get(JSON.stringify(['material',costNorm(name),unit]));
+  const validQuantity=Number.isFinite(qty)&&qty>0;
+  return {day,kind:'material',name,unit,qty:validQuantity?qty:0,rate:rate??null,
+    amount:rate!==undefined&&validQuantity?qty*rate:null,
+    issue:validQuantity?undefined:'Missing load volume',
+    status:r.status,record_id:r.id};
+}
+app.get('/api/costing/job/:id',auth,manager,(req,res)=>{try{res.set('Cache-Control','no-store');let j=db.prepare('SELECT j.*,c.name FROM costing_jobs j JOIN catalog c ON c.id=j.catalog_id WHERE j.id=?').get(req.params.id);if(!j)throw Error('Job not found');let rates=new Map(db.prepare('SELECT * FROM costing_rates').all().map(r=>[JSON.stringify([r.kind,r.name,r.unit]),r.rate])),lines=[],machineHours=[],materialQuantities=[];for(let r of db.prepare("SELECT id,date,week,status,data FROM records WHERE type='docket'").all()){let d=JSON.parse(r.data);const matchesName=costNorm(d.job)===costNorm(j.name);
 const matchesProject=d.job_catalog_id?Number(d.job_catalog_id)===j.catalog_id:matchesName;
-if(matchesProject)machineHours.push(...docketMachineHours(d.machines||[]));
-if(!matchesName)continue;for(let [kind,items] of [['machine',d.machines||[]],['material',d.materials||[]]])for(let x of items){let unit=costUnit(x.unit||(kind==='machine'?'hours':'tonnes')),key=JSON.stringify([kind,costNorm(x.name),unit]),rate=rates.get(key);let daily=Array.isArray(x.daily)?x.daily:[x.qty];for(let i=0;i<daily.length&&i<7;i++){let qty=Number(daily[i]);if(!Number.isFinite(qty)||qty<=0)continue;let dt=new Date(Date.parse(r.week||r.date)+i*86400000);if(!Number.isFinite(+dt))continue;let day=dt.toISOString().slice(0,10);if(day<j.start_day)continue;lines.push({day,kind,name:x.name,unit,qty,rate:rate??null,amount:rate===undefined?null:qty*rate,status:r.status,record_id:r.id})}}}for(let x of db.prepare('SELECT * FROM costing_extras WHERE job_id=?').all(j.id))lines.push({day:x.day,kind:'extra',name:x.label,amount:x.amount,status:'manual'});res.json({job:j,lines,machineHours})}catch(e){fail(res,e)}});
+if(matchesProject){
+  machineHours.push(...docketQuantities(d.machines||[],'machine','hours'));
+  const loads=docketQuantities((d.loads||[]).map(load=>({name:load.material,qty:load.tonnes})),'material','tonnes');
+  const materials=(d.materials||[]).filter(item=>!loads.length||!item.fromCartage);
+  materialQuantities.push(...docketQuantities(materials,'material','tonnes'),...loads);
+}
+if(!matchesProject)continue;
+const loadCosts=(d.loads||[]).map(load=>docketLoadCost(load,r,rates)).filter(Boolean);
+lines.push(...loadCosts.filter(line=>line.day>=j.start_day));
+const costMaterials=(d.materials||[]).filter(item=>!loadCosts.length||!item.fromCartage);
+for(let [kind,items] of [['machine',d.machines||[]],['material',costMaterials]])for(let x of items){let unit=costUnit(x.unit||(kind==='machine'?'hours':'tonnes')),key=JSON.stringify([kind,costNorm(x.name),unit]),rate=rates.get(key);let daily=Array.isArray(x.daily)?x.daily:[x.qty];for(let i=0;i<daily.length&&i<7;i++){let qty=Number(daily[i]);if(!Number.isFinite(qty)||qty<=0)continue;let dt=new Date(Date.parse(r.week||r.date)+i*86400000);if(!Number.isFinite(+dt))continue;let day=dt.toISOString().slice(0,10);if(day<j.start_day)continue;lines.push({day,kind,name:x.name,unit,qty,rate:rate??null,amount:rate===undefined?null:qty*rate,status:r.status,record_id:r.id})}}}for(let x of db.prepare('SELECT * FROM costing_extras WHERE job_id=?').all(j.id))lines.push({day:x.day,kind:'extra',name:x.label,amount:x.amount,status:'manual'});res.json({job:j,lines,machineHours,materialQuantities})}catch(e){fail(res,e)}});
 
 
 db.exec("CREATE TABLE IF NOT EXISTS equipment_costs(equipment_id INTEGER PRIMARY KEY,data TEXT NOT NULL)");
