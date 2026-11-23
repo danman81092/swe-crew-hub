@@ -230,7 +230,7 @@ async function startXeroConnection(){
   }catch(error){notify(error.message,true)}
 }
 
-async function xeroInvoiceSetup(jobId){
+async function xeroInvoiceSetup(jobId,showAmounts=true){
   const panel=$('#xero-invoice-panel');
   if(!panel)return;
   try{
@@ -250,7 +250,7 @@ async function xeroInvoiceSetup(jobId){
     if(!panel.isConnected)return;
     const selected=organisations.find(org=>org.id===status.tenant);
     if(selected){
-      await renderXeroDraftReview(panel,jobId,selected);
+      await renderXeroDraftReview(panel,jobId,selected,showAmounts);
       return;
     }
     panel.innerHTML='<label for="xero-organisation">Xero organisation</label><select id="xero-organisation"><option value="">Select your organisation</option>'+
@@ -262,7 +262,7 @@ async function xeroInvoiceSetup(jobId){
       orgSelect.disabled=true;
       try{
         const org=await post('/xero/organisation',{id:orgSelect.value});
-        if(panel.isConnected)await renderXeroDraftReview(panel,jobId,org);
+        if(panel.isConnected)await renderXeroDraftReview(panel,jobId,org,showAmounts);
       }catch(error){notify(error.message,true)}
       finally{orgSelect.disabled=false}
     };
@@ -270,7 +270,23 @@ async function xeroInvoiceSetup(jobId){
   }catch(error){notify(error.message,true)}
 }
 
-async function renderXeroDraftReview(panel,jobId,organisation){
+function xeroDraftPreviewTable(draft,showAmounts){
+  if(!showAmounts){
+    return '<h4>Draft invoice preview</h4><div class="tablewrap"><table style="width:100%;text-align:left">'+
+      '<thead><tr><th scope="col">Item</th><th scope="col">Quantity</th></tr></thead><tbody>'+
+      draft.lines.map(line=>'<tr><td>'+esc(line.description)+'</td><td>'+esc(line.quantity)+'</td></tr>').join('')+
+      '</tbody></table></div>';
+  }
+  return '<p>Account 195 – Other Income · GST on Income (10%).</p>'+
+    jobTotalsTable('Draft invoice preview',draft.lines.map(line=>({
+      name:line.description,quantities:[String(line.quantity)],
+      amount:Math.round(line.quantity*line.rate*100)/100,priced:true
+    })),'Quantity')+
+    '<p>Subtotal ex GST: '+costMoney(draft.totals.subtotal)+'<br>GST (10%): '+costMoney(draft.totals.gst)+
+    '<br><strong>Total incl. GST: '+costMoney(draft.totals.total)+'</strong></p>';
+}
+
+async function renderXeroDraftReview(panel,jobId,organisation,showAmounts){
   panel.querySelector('#xero-draft-form-area')?.remove();
   const review=document.createElement('div');
   review.id='xero-draft-form-area';
@@ -282,13 +298,9 @@ async function renderXeroDraftReview(panel,jobId,organisation){
     const draft=await post('/xero/job/'+jobId+'/preview',values);
     if(!review.isConnected)return;
     review.innerHTML='<p><b>'+esc(organisation.name)+'</b> · '+esc(draft.reference)+'</p>'+
-      '<p>Account 195 – Other Income · GST on Income (10%). Choose the customer in Xero.</p>'+
+      '<p>Choose the customer in Xero.</p>'+
       (draft.previous?'<p>The previous draft covered work through '+esc(draft.previous)+'. This draft uses later entries.</p>':'')+
-      jobTotalsTable('Draft invoice preview',draft.lines.map(line=>({
-        name:line.description,quantities:[String(line.quantity)],
-        amount:Math.round(line.quantity*line.rate*100)/100,priced:true
-      })),'Quantity')+
-      '<p>Subtotal ex GST: '+costMoney(draft.totals.subtotal)+'<br>GST (10%): '+costMoney(draft.totals.gst)+'<br><strong>Total incl. GST: '+costMoney(draft.totals.total)+'</strong></p>'+
+      xeroDraftPreviewTable(draft,showAmounts)+
       (draft.excluded?'<p>'+draft.excluded+' draft or returned costing entries excluded.</p>':'')+
       '<button id="xero-create-draft">Create draft in Xero</button>';
     review.querySelector('button').onclick=async event=>{
@@ -445,7 +457,7 @@ function docketQuantityTable(title,items){
   </table></div>`:'<p>None recorded.</p>');
 }
 
-function docketRecordView(record){
+function docketQuantityLines(record){
   const d=record.data;
   const lines=[];
   const loads=(d.loads||[]).filter(load=>load.material?.trim()&&Number(load.tonnes)>0);
@@ -465,19 +477,34 @@ function docketRecordView(record){
     }
   }
   for(const load of loads)lines.push({kind:'material',name:load.material,unit:'tonnes',qty:Number(load.tonnes),day:load.date||''});
+  return lines;
+}
+
+function dailyQuantityTables(lines){
   const days=new Map();
   for(const line of lines){
     if(!days.has(line.day))days.set(line.day,[]);
     days.get(line.day).push(line);
   }
+  return [...days].sort(([a],[b])=>b.localeCompare(a)).map(([day,items])=>
+    docketQuantityTable(day||'Date unavailable',jobQuantitySummary(items,false))).join('')||'<p>No daily quantities recorded.</p>';
+}
+
+function projectQuantityTables(lines){
   const totals=jobQuantitySummary(lines,false);
+  return docketQuantityTable('Machine hours and labour',totals.filter(item=>item.kind==='machine'))+
+    docketQuantityTable('Crushed rock and other materials',totals.filter(item=>item.kind==='material'));
+}
+
+function docketRecordView(record){
+  const d=record.data;
+  const lines=docketQuantityLines(record);
   return `<p><b>Project</b> ${esc(d.job)} · Week commencing ${esc(recWeek(record))}</p>
     <h3>Description of works</h3><div style="white-space:pre-wrap">${esc(d.description||'Not recorded')}</div>
     <h3>Daily recorded quantities</h3>
-    ${[...days].sort(([a],[b])=>b.localeCompare(a)).map(([day,items])=>docketQuantityTable(day||'Date unavailable',jobQuantitySummary(items,false))).join('')||'<p>No daily quantities recorded.</p>'}
+    ${dailyQuantityTables(lines)}
     <h3>Docket totals</h3>
-    ${docketQuantityTable('Machine hours and labour',totals.filter(item=>item.kind==='machine'))}
-    ${docketQuantityTable('Crushed rock and other materials',totals.filter(item=>item.kind==='material'))}
+    ${projectQuantityTables(lines)}
     ${d.notes?`<h3>Notes</h3><p style="white-space:pre-wrap">${esc(d.notes)}</p>`:''}
     ${cartageView(d.loads)}${photoView(d.photos)}`;
 }
@@ -563,7 +590,39 @@ async function toggleEmployee(id){let u=users.find(x=>x.id===id);if(!u||id===me.
 function timesheetProgress(w){let rs=records.filter(r=>r.user_id===officeUser&&r.type==='timesheet'&&recWeek(r)===w);if(!rs.length)return '<div class="muted">Not started — no saved timesheet</div>';return rs.map(r=>{let ds=r.data.days||[],entered=ds.filter((d,i)=>d.start||d.finish||d.description?.trim()||Number(d.break)>0||d.kind!==(i>4?'day off':'work')).length,status=r.data.archivedAt?'Archived':({draft:'In progress',returned:'Returned for correction',submitted:'Submitted',approved:'Approved'}[r.status]||r.status);return '<div style="margin:8px 0"><b>'+esc(status)+'</b> · '+entered+'/7 days with entries · '+ds.reduce((n,d)=>n+hours(d),0).toFixed(2)+' hrs<p class="muted">Last saved: '+esc(displayStamp(r.updated_at||r.created_at))+'</p><button class="alt" onclick="viewRecord('+r.id+')">View saved timesheet</button></div>'}).join('')}
 async function refreshTimesheetProgress(){try{await refresh();office()}catch(e){notify(e.message,true)}}
 
-function office(){if(me.role!=='manager')return go('home');let out='<section class="card hero"><h2>Office dashboard · V2</h2><p>Employee weekly folders and project records</p><button class="alt" onclick="go(\'approvals\')">Timesheets awaiting approval ('+records.filter(r=>r.type==='timesheet'&&r.status==='submitted').length+')</button></section><div class="actions"><button onclick="officeReset(\'people\')">Employees</button><button onclick="officeReset(\'jobs\')">Jobs</button><button onclick="officeReset(\'settings\')">Settings</button></div><section class="card">';if(officeMode==='settings'){out+='<h2>Management settings</h2><button onclick="manageEmployees()">Manage Employees</button><h3>Add employee</h3><form id="newuser"><label>Name</label><input name="name" required><label>PIN</label><input type="password" name="pin" pattern="[0-9]{4}" required><label>Role</label><select name="role"><option value="employee">Employee</option><option value="manager">Manager</option></select><button>Add employee</button></form><hr><form id="newcat"><label>Type</label><select name="kind"><option>job</option><option>machine</option><option>material</option></select><label>Name</label><input name="name" required><label>Unit</label><input name="unit"><button>Add item</button></form>'}else if(officeMode==='jobs'){if(officeJob===null){out+='<h2>Jobs</h2><div id="officejoblist">Loading jobs…</div>';}else{let rs=records.filter(r=>r.type==='docket'&&r.data.job===officeJob&&r.status!=='draft');out+='<button class="alt" onclick="officeReset(\'jobs\')">← Jobs</button><h2>'+esc(officeJob)+'</h2>'+summaryRows(rs)+rs.map(officeRecord).join('')}}else if(officeUser===null){let staff=users.filter(u=>u.role!=='manager'),active=staff.filter(u=>u.active),past=staff.filter(u=>!u.active),rows=xs=>xs.map(u=>'<div class="line row"><b>'+esc(u.name)+'</b><button class="alt" onclick="pickEmployee('+u.id+')">Open →</button></div>').join('');out+='<h2>Current Employees</h2>'+(rows(active)||'<p>No current employees.</p>')+'<details style="margin-top:20px"><summary>Past Employees ('+past.length+')</summary>'+ (rows(past)||'<p>No past employees.</p>')+'</details>'}else{let rs=records.filter(r=>r.user_id===officeUser&&(r.status!=='draft'||r.type==='timesheet')),u=users.find(u=>u.id===officeUser);out+='<button class="alt" onclick="officeReset(\'people\')">← Employees</button><h2>'+esc(u?.name)+'</h2>';if(!officeFolder){out+='<button class="tile" onclick="personalDetails('+officeUser+')"><span>♟</span>Personal information<small>Contact details &amp; emergency contact</small></button><button class="tile" onclick="qualificationPage('+officeUser+')"><span>▣</span>Licences &amp; Tickets<small>Licence numbers, expiry &amp; front/back photos</small></button><button class="tile" onclick="formsPage('+officeUser+')"><span>📁</span>Forms &amp; Documents<small>Assigned and completed site forms</small></button><div class="grid">'+[['timesheet','Timesheets','Weekly hours, signatures & payroll'],['docket','Dockets','Machine hours & materials'],['archive','Archived Timesheets','Actioned payroll records']].map(([type,label,desc])=>'<button class="tile" onclick="pickFolder(\''+type+'\')"><span>📁</span>'+label+'<small>'+desc+' · '+rs.filter(r=>folderMatch(r,type)).length+' records</small></button>').join('')+'</div>'}else{rs=rs.filter(r=>folderMatch(r,officeFolder));out+='<button class="alt" onclick="officeFolder=null;officeWeek=null;office()">← Employee folders</button><h3>'+(officeFolder==='timesheet'?'Timesheets':officeFolder==='archive'?'Archived Timesheets':'Dockets')+'</h3>';if(officeFolder==='timesheet')out+='<button class="alt" onclick="refreshTimesheetProgress()">Refresh saved progress</button>';if(!officeWeek){let weeks=[...new Set([weekOf(today()),...rs.map(recWeek)])].sort().reverse();out+=weeks.map(w=>'<div class="line"><div class="row"><b>📁 '+esc(weekLabel(w))+'</b><button class="alt" onclick="pickWeek(\''+w+'\')">Open ('+rs.filter(r=>recWeek(r)===w).length+')</button></div>'+(officeFolder==='timesheet'?timesheetProgress(w):'')+'</div>').join('')}else{rs=rs.filter(r=>recWeek(r)===officeWeek);out+='<button class="alt" onclick="officeWeek=null;office()">← Weekly folders</button><h3>'+esc(weekLabel(officeWeek))+'</h3>'+summaryRows(rs)+(rs.map(officeRecord).join('')||'<p>No submissions for this week.</p>')}}}out+='</section><section class="card"><button onclick="payroll()">Weekly approved payroll CSV</button> <button class="alt" onclick="location.href=\'/api/export\'">All records CSV</button></section>';$('#screen').innerHTML=out;if($('#officejoblist'))loadOfficeJobs();for(let [id,url] of [['newuser','/users'],['newcat','/catalog']])if($('#'+id))$('#'+id).onsubmit=async e=>{e.preventDefault();try{await post(url,Object.fromEntries(new FormData(e.target)));await refresh();office();notify('Saved')}catch(e){notify(e.message,true)}}}
+function officeProjectView(name){
+  const normalise=value=>String(value||'').trim().toLowerCase();
+  const catalogJob=catalog.find(item=>item.kind==='job'&&item.name===name);
+  const dockets=records.filter(record=>record.type==='docket'&&
+    (catalogJob&&record.data.job_catalog_id?Number(record.data.job_catalog_id)===catalogJob.id:normalise(record.data.job)===normalise(name)));
+  const lines=dockets.flatMap(docketQuantityLines);
+  return `<button class="alt" onclick="officeReset('jobs')">← Jobs</button><h2>${esc(name)}</h2>
+    <h3>Daily recorded quantities</h3>${dailyQuantityTables(lines)}
+    <h3>Project totals</h3><p class="muted">Includes saved draft dockets.</p>${projectQuantityTables(lines)}
+    <h3>Xero draft invoice</h3><button class="alt" onclick="prepareOfficeXeroDraft(this)">Prepare Xero draft</button>
+    <div id="xero-invoice-panel"></div>
+    <h3>Dockets and photos</h3>${dockets.filter(record=>record.status!=='draft').map(officeRecord).join('')||'<p>No submitted dockets.</p>'}`;
+}
+
+async function prepareOfficeXeroDraft(button){
+  const name=officeJob;
+  const panel=$('#xero-invoice-panel');
+  if(!panel)return;
+  button.disabled=true;
+  try{
+    const {jobs}=await api('/costing');
+    if(!panel.isConnected)return;
+    const project=jobs.find(job=>job.name===name);
+    if(!project){
+      panel.textContent='Set up this project in Job Costing before creating its first Xero draft.';
+      return;
+    }
+    await xeroInvoiceSetup(project.id,false);
+  }catch(error){if(panel.isConnected)panel.textContent=error.message}
+  finally{button.disabled=false}
+}
+
+function office(){if(me.role!=='manager')return go('home');let out='<section class="card hero"><h2>Office dashboard · V2</h2><p>Employee weekly folders and project records</p><button class="alt" onclick="go(\'approvals\')">Timesheets awaiting approval ('+records.filter(r=>r.type==='timesheet'&&r.status==='submitted').length+')</button></section><div class="actions"><button onclick="officeReset(\'people\')">Employees</button><button onclick="officeReset(\'jobs\')">Jobs</button><button onclick="officeReset(\'settings\')">Settings</button></div><section class="card">';if(officeMode==='settings'){out+='<h2>Management settings</h2><button onclick="manageEmployees()">Manage Employees</button><h3>Add employee</h3><form id="newuser"><label>Name</label><input name="name" required><label>PIN</label><input type="password" name="pin" pattern="[0-9]{4}" required><label>Role</label><select name="role"><option value="employee">Employee</option><option value="manager">Manager</option></select><button>Add employee</button></form><hr><form id="newcat"><label>Type</label><select name="kind"><option>job</option><option>machine</option><option>material</option></select><label>Name</label><input name="name" required><label>Unit</label><input name="unit"><button>Add item</button></form>'}else if(officeMode==='jobs'){if(officeJob===null){out+='<h2>Jobs</h2><div id="officejoblist">Loading jobs…</div>';}else{out+=officeProjectView(officeJob)}}else if(officeUser===null){let staff=users.filter(u=>u.role!=='manager'),active=staff.filter(u=>u.active),past=staff.filter(u=>!u.active),rows=xs=>xs.map(u=>'<div class="line row"><b>'+esc(u.name)+'</b><button class="alt" onclick="pickEmployee('+u.id+')">Open →</button></div>').join('');out+='<h2>Current Employees</h2>'+(rows(active)||'<p>No current employees.</p>')+'<details style="margin-top:20px"><summary>Past Employees ('+past.length+')</summary>'+ (rows(past)||'<p>No past employees.</p>')+'</details>'}else{let rs=records.filter(r=>r.user_id===officeUser&&(r.status!=='draft'||r.type==='timesheet')),u=users.find(u=>u.id===officeUser);out+='<button class="alt" onclick="officeReset(\'people\')">← Employees</button><h2>'+esc(u?.name)+'</h2>';if(!officeFolder){out+='<button class="tile" onclick="personalDetails('+officeUser+')"><span>♟</span>Personal information<small>Contact details &amp; emergency contact</small></button><button class="tile" onclick="qualificationPage('+officeUser+')"><span>▣</span>Licences &amp; Tickets<small>Licence numbers, expiry &amp; front/back photos</small></button><button class="tile" onclick="formsPage('+officeUser+')"><span>📁</span>Forms &amp; Documents<small>Assigned and completed site forms</small></button><div class="grid">'+[['timesheet','Timesheets','Weekly hours, signatures & payroll'],['docket','Dockets','Machine hours & materials'],['archive','Archived Timesheets','Actioned payroll records']].map(([type,label,desc])=>'<button class="tile" onclick="pickFolder(\''+type+'\')"><span>📁</span>'+label+'<small>'+desc+' · '+rs.filter(r=>folderMatch(r,type)).length+' records</small></button>').join('')+'</div>'}else{rs=rs.filter(r=>folderMatch(r,officeFolder));out+='<button class="alt" onclick="officeFolder=null;officeWeek=null;office()">← Employee folders</button><h3>'+(officeFolder==='timesheet'?'Timesheets':officeFolder==='archive'?'Archived Timesheets':'Dockets')+'</h3>';if(officeFolder==='timesheet')out+='<button class="alt" onclick="refreshTimesheetProgress()">Refresh saved progress</button>';if(!officeWeek){let weeks=[...new Set([weekOf(today()),...rs.map(recWeek)])].sort().reverse();out+=weeks.map(w=>'<div class="line"><div class="row"><b>📁 '+esc(weekLabel(w))+'</b><button class="alt" onclick="pickWeek(\''+w+'\')">Open ('+rs.filter(r=>recWeek(r)===w).length+')</button></div>'+(officeFolder==='timesheet'?timesheetProgress(w):'')+'</div>').join('')}else{rs=rs.filter(r=>recWeek(r)===officeWeek);out+='<button class="alt" onclick="officeWeek=null;office()">← Weekly folders</button><h3>'+esc(weekLabel(officeWeek))+'</h3>'+summaryRows(rs)+(rs.map(officeRecord).join('')||'<p>No submissions for this week.</p>')}}}out+='</section><section class="card"><button onclick="payroll()">Weekly approved payroll CSV</button> <button class="alt" onclick="location.href=\'/api/export\'">All records CSV</button></section>';$('#screen').innerHTML=out;if($('#officejoblist'))loadOfficeJobs();for(let [id,url] of [['newuser','/users'],['newcat','/catalog']])if($('#'+id))$('#'+id).onsubmit=async e=>{e.preventDefault();try{await post(url,Object.fromEntries(new FormData(e.target)));await refresh();office();notify('Saved')}catch(e){notify(e.message,true)}}}
 function officeReset(mode){officeFolder=null;officeMode=mode;officeUser=null;officeWeek=null;officeJob=null;office()}
 async function pickFolder(type){officeFolder=type;officeWeek=null;if(type==='timesheet'){try{await refresh()}catch(e){notify(e.message,true)}}office()}
 function pickEmployee(id){officeFolder=null;officeUser=id;officeWeek=null;office()}
