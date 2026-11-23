@@ -4,6 +4,16 @@ const callback = 'https://swe-crew-hub.onrender.com/api/xero/callback';
 const origin = new URL(callback).origin;
 const draftContactName = 'SWE Draft – Select Customer';
 
+const salesAccount = '195';
+const taxType = 'OUTPUT';
+
+export function draftTotals(lines) {
+  const amounts = lines.map(line => Math.round((line.quantity * line.rate + Number.EPSILON) * 100));
+  const subtotal = amounts.reduce((total, cents) => total + cents, 0);
+  const gst = amounts.reduce((total, cents) => total + Math.round(cents / 10), 0);
+  return {subtotal:subtotal / 100, gst:gst / 100, total:(subtotal + gst) / 100};
+}
+
 function validDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(value);
@@ -183,13 +193,13 @@ export function registerXero({app,db,auth,manager,readJobCosting}) {
     if (connection()?.tenant!==tenant) throw Error('The Xero organisation changed. Open the preview again.');
     const invoice={Type:'ACCREC',Status:'DRAFT',Contact:{ContactID:contact.ContactID},
       LineAmountTypes:'Exclusive',Reference:(costing.job.name+' | '+from+' to '+to).slice(0,255),
-      LineItems:draft.lines.map(line=>({Description:line.description,Quantity:line.quantity,UnitAmount:line.rate}))};
+      LineItems:draft.lines.map(line=>({Description:line.description,Quantity:line.quantity,UnitAmount:line.rate,AccountCode:salesAccount,TaxType:taxType}))};
     const proof=crypto.createHmac('sha256',key).update(JSON.stringify([req.user.id,tenant,costing.job.id,from,to,invoice])).digest('hex');
     return {...draft,proof,invoice,tenant,from,to,job:costing.job.id,previous};
   }
   app.post('/api/xero/job/:id/preview',auth,manager,handle(async(req,res)=>{
     const {lines,excluded,proof,invoice,previous}=await preview(req);
-    res.json({lines,excluded,proof,reference:invoice.Reference,previous});
+    res.json({lines,excluded,proof,reference:invoice.Reference,previous,totals:draftTotals(lines)});
   }));
   const reserve=db.transaction((draft,id)=>{
     const existing=db.prepare('SELECT * FROM xero_draft_requests WHERE job=? AND start_day<=? AND end_day>=? AND status<>?').get(draft.job,draft.to,draft.from,'failed');

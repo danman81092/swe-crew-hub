@@ -282,12 +282,13 @@ async function renderXeroDraftReview(panel,jobId,organisation){
     const draft=await post('/xero/job/'+jobId+'/preview',values);
     if(!review.isConnected)return;
     review.innerHTML='<p><b>'+esc(organisation.name)+'</b> · '+esc(draft.reference)+'</p>'+
-      '<p>Choose the customer and finish the invoice details in Xero.</p>'+
+      '<p>Account 195 – Other Income · GST on Income (10%). Choose the customer in Xero.</p>'+
       (draft.previous?'<p>The previous draft covered work through '+esc(draft.previous)+'. This draft uses later entries.</p>':'')+
       jobTotalsTable('Draft invoice preview',draft.lines.map(line=>({
         name:line.description,quantities:[String(line.quantity)],
         amount:Math.round(line.quantity*line.rate*100)/100,priced:true
       })),'Quantity')+
+      '<p>Subtotal ex GST: '+costMoney(draft.totals.subtotal)+'<br>GST (10%): '+costMoney(draft.totals.gst)+'<br><strong>Total incl. GST: '+costMoney(draft.totals.total)+'</strong></p>'+
       (draft.excluded?'<p>'+draft.excluded+' draft or returned costing entries excluded.</p>':'')+
       '<button id="xero-create-draft">Create draft in Xero</button>';
     review.querySelector('button').onclick=async event=>{
