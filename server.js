@@ -173,6 +173,33 @@ const costMaterials=(d.materials||[]).filter(item=>!loadCosts.length||!item.from
 for(let [kind,items] of [['machine',d.machines||[]],['material',costMaterials]])for(let x of items){let unit=costUnit(x.unit||(kind==='machine'?'hours':'tonnes')),key=JSON.stringify([kind,costNorm(x.name),unit]),rate=rates.get(key);let daily=Array.isArray(x.daily)?x.daily:[x.qty];for(let i=0;i<daily.length&&i<7;i++){let qty=Number(daily[i]);if(!Number.isFinite(qty)||qty<=0)continue;let dt=new Date(Date.parse(r.week||r.date)+i*86400000);if(!Number.isFinite(+dt))continue;let day=dt.toISOString().slice(0,10);if(day<j.start_day)continue;lines.push({day,kind,name:x.name,unit,qty,rate:rate??null,amount:rate===undefined?null:qty*rate,status:r.status,record_id:r.id})}}}for(let x of db.prepare('SELECT * FROM costing_extras WHERE job_id=?').all(j.id))lines.push({day:x.day,kind:'extra',name:x.label,amount:x.amount,status:'manual'});return {job:j,lines,machineHours,materialQuantities};
 }
 app.get('/api/costing/job/:id',auth,manager,(req,res)=>{try{res.set('Cache-Control','no-store');res.json(readJobCosting(req.params.id))}catch(e){fail(res,e)}});
+const approveJobForCosting=db.transaction(docketId=>{
+  const docket=db.prepare("SELECT date,data FROM records WHERE id=? AND type='docket' AND status IN ('submitted','approved')").get(docketId);
+  if(!docket)throw Error('A submitted or approved docket is required.');
+  const data=JSON.parse(docket.data);
+  const name=String(data.job||'').trim();
+  if(!name||name.length>200)throw Error('Enter a valid job name on the docket.');
+  const catalogJob=data.job_catalog_id
+    ?db.prepare("SELECT id,name FROM catalog WHERE id=? AND kind='job'").get(Number(data.job_catalog_id))
+    :db.prepare("SELECT id,name FROM catalog WHERE kind='job' AND lower(trim(name))=lower(?) ORDER BY (name=?) DESC,id LIMIT 1").get(name,name);
+  if(data.job_catalog_id&&!catalogJob)throw Error('The project linked to this docket could not be found.');
+  const catalogId=catalogJob?.id??db.prepare("INSERT INTO catalog(kind,name,active) VALUES ('job',?,1)").run(name).lastInsertRowid;
+  const existing=db.prepare('SELECT id FROM costing_jobs WHERE catalog_id=?').get(catalogId);
+  if(existing)return {id:existing.id,created:false};
+  const result=db.prepare("INSERT INTO costing_jobs(catalog_id,client,budget,margin,start_day) VALUES (?,?,0,35,'0001-01-01')").run(catalogId,catalogJob?.name||name);
+  const startDay=readJobCosting(result.lastInsertRowid).lines.map(line=>line.day).sort()[0]||costDate(docket.date);
+  db.prepare('UPDATE costing_jobs SET start_day=? WHERE id=?').run(startDay,result.lastInsertRowid);
+  return {id:result.lastInsertRowid,created:true};
+});
+
+app.post('/api/costing/approve-docket/:id',auth,manager,(req,res)=>{
+  try{
+    const id=Number(req.params.id);
+    if(!Number.isSafeInteger(id)||id<=0)throw Error('Choose a submitted docket.');
+    res.json(approveJobForCosting.immediate(id));
+  }catch(error){fail(res,error)}
+});
+
 registerXero({app,db,auth,manager,readJobCosting});
 
 

@@ -640,12 +640,37 @@ function officeProjectView(name){
   const dockets=records.filter(record=>record.type==='docket'&&
     (catalogJob&&record.data.job_catalog_id?Number(record.data.job_catalog_id)===catalogJob.id:normalise(record.data.job)===normalise(name)));
   const lines=dockets.flatMap(docketQuantityLines);
+  const source=dockets.find(record=>['submitted','approved'].includes(record.status));
   return `<button class="alt" onclick="officeReset('jobs')">← Jobs</button><h2>${esc(name)}</h2>
     <h3>Daily recorded quantities</h3>${dailyQuantityTables(lines)}
     <h3>Project totals</h3><p class="muted">Includes saved draft dockets.</p>${projectQuantityTables(lines)}
     <h3>Xero draft invoice</h3><button class="alt" onclick="editOfficeJobCosting()">Edit job settings</button> <button class="alt" onclick="prepareOfficeXeroDraft(this)">Prepare Xero draft</button>
     <div id="xero-invoice-panel"></div>
-    <h3>Dockets and photos</h3>${dockets.filter(record=>record.status!=='draft').map(officeRecord).join('')||'<p>No submitted dockets.</p>'}`;
+    <h3>Dockets and photos</h3>${dockets.filter(record=>record.status!=='draft').map(officeRecord).join('')||'<p>No submitted dockets.</p>'}
+    ${source?`<div class="actions"><button onclick="approveOfficeJob(this,${source.id})">Approve for job costing</button></div><div id="office-costing-approval" role="status"></div>`:'<p class="muted">A submitted docket is needed to approve this job for costing.</p>'}`;
+}
+
+async function approveOfficeJob(button,docketId){
+  const status=$('#office-costing-approval');
+  button.disabled=true;
+  try{
+    const result=await post('/costing/approve-docket/'+docketId,{});
+    if(!status.isConnected)return;
+    status.textContent=result.created?'Job costing created.':'This job already has a costing record.';
+    const open=document.createElement('button');
+    open.className='alt';
+    open.textContent='Open job costing';
+    open.onclick=()=>costJobView(result.id);
+    status.append(' ',open);
+    const draft=document.createElement('button');
+    draft.className='alt';
+    draft.textContent='Prepare Xero draft';
+    draft.onclick=()=>xeroInvoiceSetup(result.id,false);
+    status.append(' ',draft);
+    button.hidden=true;
+  }catch(error){
+    if(status.isConnected)status.textContent=error.message;
+  }finally{button.disabled=false}
 }
 
 async function editOfficeJobCosting(){
@@ -653,7 +678,7 @@ async function editOfficeJobCosting(){
   try{
     const {jobs}=await api('/costing');
     if(officeJob!==name||officeMode!=='jobs')return;
-    const job=jobs.find(item=>item.name===name);
+    const job=jobs.find(item=>item.name===name)||jobs.find(item=>item.name.trim().toLowerCase()===name.trim().toLowerCase());
     if(!job)return notify('Set up this project in Job Costing first.',true);
     await costJobForm(job.id,true);
   }catch(error){notify(error.message,true)}
@@ -667,7 +692,7 @@ async function prepareOfficeXeroDraft(button){
   try{
     const {jobs}=await api('/costing');
     if(!panel.isConnected)return;
-    const project=jobs.find(job=>job.name===name);
+    const project=jobs.find(job=>job.name===name)||jobs.find(job=>job.name.trim().toLowerCase()===name.trim().toLowerCase());
     if(!project){
       panel.textContent='Set up this project in Job Costing before creating its first Xero draft.';
       return;
