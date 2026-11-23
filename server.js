@@ -1,3 +1,4 @@
+import { registerJobSwms } from './job-swms.js';
 import { registerXero } from './xero.js';
 import express from 'express';
 import webpush from 'web-push';
@@ -132,6 +133,8 @@ app.get('/api/swms/:id/file',auth,(req,res)=>{
   else res.set('Content-Disposition','inline');
   res.type('application/pdf').send(Buffer.from(document.pdf,'base64'));
 });
+
+registerJobSwms({app,db,auth,manager,fail});
 
 app.get('/api/site-forms',auth,(req,res)=>{res.set('Cache-Control','no-store');let fields='SELECT id,user_id,title,job,instructions,filename,created_at,completed_at,response,CASE WHEN returned_pdf IS NULL OR returned_pdf=\'\' THEN 0 ELSE 1 END has_return FROM site_forms';res.json(req.user.role==='manager'?db.prepare(fields+' ORDER BY id DESC').all():db.prepare(fields+' WHERE user_id=? ORDER BY id DESC').all(req.user.id))});
 app.post('/api/site-forms',auth,manager,(req,res)=>{try{const {userId,title,job='',instructions='',filename,pdf}=req.body;if(!db.prepare("SELECT id FROM users WHERE id=? AND active=1 AND role='employee'").get(userId)||typeof title!=='string'||!title.trim()||title.length>200||typeof job!=='string'||job.length>200||typeof instructions!=='string'||instructions.length>2000||typeof filename!=='string'||filename.length>200||!validFormPdf(pdf))throw Error('Select an active employee and PDF under 3 MB');let x=db.prepare('INSERT INTO site_forms(user_id,assigned_by,title,job,instructions,filename,pdf) VALUES (?,?,?,?,?,?,?)').run(userId,req.user.id,title.trim(),job,instructions,filename,pdf);res.json({id:x.lastInsertRowid})}catch(e){fail(res,e)}});
