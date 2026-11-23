@@ -434,7 +434,55 @@ function timesheetDayView(day,week,index){
     <div style="white-space:pre-wrap">${esc(day.description)}</div>
   </div>`;
 }
-function viewRecord(id){let r=records.find(x=>x.id===id);let d=r.data;let content=r.type==='timesheet'?`<p>Total: <b>${d.days.reduce((s,x)=>s+hours(x),0).toFixed(2)} hours</b></p>${d.days.map((day,index)=>timesheetDayView(day,recWeek(r),index)).join('')}${d.signature?`<p>${d.adminCorrected?'Original employee signature — hours subsequently corrected by management':'Signed:'}</p><img style="width:100%;max-width:380px;background:white;border-radius:12px" src="${d.signature}">`:''}`:`<p>Job/Project/Name: ${esc(d.job)}</p><h3>Description of works</h3><div style="white-space:pre-wrap">${esc(d.description||"Not recorded")}</div><h3>Machines</h3>${d.machines.map(x=>`<p>${esc(x.name)}: ${x.qty} hours</p>`).join('')}<h3>Materials</h3>${d.materials.map(x=>`<p>${esc(x.name)}: ${x.qty} ${esc(x.unit)}</p>`).join('')}<p>${esc(d.notes)}</p>${cartageView(d.loads)}${photoView(d.photos)}`;$('#screen').innerHTML=`<section class="card"><button class="alt" onclick="go('${me.role==='manager'?(page==='approvals'?'approvals':'office'):'history'}')">← Back</button><h2>${esc(r.employee)} · ${esc(r.type)}</h2><span class="pill">${esc(r.status)}</span>${content}<div class="actions"><button class="alt" onclick="audit(${id})">View change history</button></div><div id="audit"></div></section>`}
+function docketQuantityTable(title,items){
+  const totals=new Map();
+  for(const item of items)totals.set(item.unit,(totals.get(item.unit)||0)+item.qty);
+  const format=qty=>qty.toLocaleString('en-AU',{maximumFractionDigits:4});
+  return `<h4>${esc(title)}</h4>`+(items.length?`<div class="tablewrap"><table style="width:100%;text-align:left">
+    <thead><tr><th scope="col">Item</th><th scope="col">Quantity</th></tr></thead>
+    <tbody>${items.map(item=>`<tr><td>${esc(item.name)}</td><td>${format(item.qty)} ${esc(item.unit)}</td></tr>`).join('')}</tbody>
+    <tfoot>${[...totals].map(([unit,qty])=>`<tr><th scope="row">Total</th><td><strong>${format(qty)} ${esc(unit)}</strong></td></tr>`).join('')}</tfoot>
+  </table></div>`:'<p>None recorded.</p>');
+}
+
+function docketRecordView(record){
+  const d=record.data;
+  const lines=[];
+  const loads=(d.loads||[]).filter(load=>load.material?.trim()&&Number(load.tonnes)>0);
+  const materials=(d.materials||[]).filter(item=>!loads.length||!item.fromCartage);
+  for(const [kind,items] of [['machine',d.machines||[]],['material',materials]]){
+    for(const item of items){
+      const rawUnit=String(item.unit||'').trim();
+      const unit=kind==='machine'?'hrs':/^(t|tons?|tonnes?)$/i.test(rawUnit)?'tonnes':rawUnit;
+      const hasDaily=Array.isArray(item.daily)&&item.daily.length;
+      const quantities=hasDaily?item.daily.slice(0,7):[item.qty];
+      quantities.forEach((qty,index)=>{
+        if(!item.name?.trim()||!Number.isFinite(Number(qty))||Number(qty)<=0)return;
+        const day=new Date((hasDaily?recWeek(record):record.date)+'T12:00:00Z');
+        day.setUTCDate(day.getUTCDate()+index);
+        lines.push({kind,name:item.name,unit,qty:Number(qty),day:Number.isFinite(+day)?day.toISOString().slice(0,10):''});
+      });
+    }
+  }
+  for(const load of loads)lines.push({kind:'material',name:load.material,unit:'tonnes',qty:Number(load.tonnes),day:load.date||''});
+  const days=new Map();
+  for(const line of lines){
+    if(!days.has(line.day))days.set(line.day,[]);
+    days.get(line.day).push(line);
+  }
+  const totals=jobQuantitySummary(lines,false);
+  return `<p><b>Project</b> ${esc(d.job)} · Week commencing ${esc(recWeek(record))}</p>
+    <h3>Description of works</h3><div style="white-space:pre-wrap">${esc(d.description||'Not recorded')}</div>
+    <h3>Daily recorded quantities</h3>
+    ${[...days].sort(([a],[b])=>b.localeCompare(a)).map(([day,items])=>docketQuantityTable(day||'Date unavailable',jobQuantitySummary(items,false))).join('')||'<p>No daily quantities recorded.</p>'}
+    <h3>Docket totals</h3>
+    ${docketQuantityTable('Machine hours and labour',totals.filter(item=>item.kind==='machine'))}
+    ${docketQuantityTable('Crushed rock and other materials',totals.filter(item=>item.kind==='material'))}
+    ${d.notes?`<h3>Notes</h3><p style="white-space:pre-wrap">${esc(d.notes)}</p>`:''}
+    ${cartageView(d.loads)}${photoView(d.photos)}`;
+}
+
+function viewRecord(id){let r=records.find(x=>x.id===id);let d=r.data;let content=r.type==='timesheet'?`<p>Total: <b>${d.days.reduce((s,x)=>s+hours(x),0).toFixed(2)} hours</b></p>${d.days.map((day,index)=>timesheetDayView(day,recWeek(r),index)).join('')}${d.signature?`<p>${d.adminCorrected?'Original employee signature — hours subsequently corrected by management':'Signed:'}</p><img style="width:100%;max-width:380px;background:white;border-radius:12px" src="${d.signature}">`:''}`:docketRecordView(r);$('#screen').innerHTML=`<section class="card"><button class="alt" onclick="go('${me.role==='manager'?(page==='approvals'?'approvals':'office'):'history'}')">← Back</button><h2>${esc(r.employee)} · ${esc(r.type)}</h2><span class="pill">${esc(r.status)}</span>${content}<div class="actions"><button class="alt" onclick="audit(${id})">View change history</button></div><div id="audit"></div></section>`}
 async function audit(id){let x=await api('/audit/'+id);$('#audit').innerHTML=x.map(a=>`<div class="line muted">${esc(a.at)} · ${esc(a.actor)} · ${esc(a.action)} ${esc(a.details)}</div>`).join('')}
 async function submitRecord(id){try{await post('/records/'+id+'/submit',{});await refresh();go('history');notify('Submitted')}catch(e){notify(e.message,true)}}
 async function review(id,status){
@@ -473,7 +521,14 @@ function loadRateEditor(l,i){
 function renderCartage(){let el=$('#cartage');if(!el)return;el.innerHTML=cartageLoads.map((l,i)=>'<div class="day"><div class="row"><b>Load '+(i+1)+'</b><button class="alt" onclick="cartageLoads.splice('+i+',1);renderCartage()">Remove</button></div>'+[['date','Delivery date','date'],['material','Material','text'],['supplier','Quarry / supplier','text'],['tonnes','Net tonnes','number'],['reference','Weighbridge docket no. (optional)','text']].map(([k,label,type])=>'<label>'+label+'</label><input type="'+type+'" '+(type==='number'?'min="0" step="0.01"':'')+' value="'+esc(l[k]||'')+'" oninput="updateCartage('+i+',\''+k+'\',this.value)">').join('')+loadRateEditor(l,i)+loadPhotoEditor(l,i)+'</div>').join('');cartageTotals()}
 function cartageTotals(){if(!$('#loadtotal'))return;let good=cartageLoads.filter(l=>Number(l.tonnes)>0);$('#loadcount').textContent=good.length;$('#loadtotal').textContent=good.reduce((n,l)=>n+Number(l.tonnes),0).toFixed(2);let groups=new Map();for(let l of good){let k=l.material.trim()||'Unspecified material';groups.set(k,(groups.get(k)||0)+Number(l.tonnes))}$('#loadsummary').innerHTML=[...groups].map(([k,n])=>'<p>'+esc(k)+' · '+n.toFixed(2)+' Ton</p>').join('')}
 function cartageMaterials(w,strict=false){let groups=new Map();for(let l of cartageLoads){let qty=Number(l.tonnes),day=Math.round((Date.parse(l.date)-Date.parse(w))/864e5);if(!l.material.trim()||!Number.isFinite(qty)||qty<=0||!Number.isInteger(day)||day<0||day>6){if(strict)throw Error('Complete each load with material, positive tonnes and a date in this week');continue}let key=l.material.trim(),x=groups.get(key)||{name:key,unit:'Ton',daily:Array(7).fill(0),qty:0,fromCartage:true};x.daily[day]+=qty;x.qty+=qty;groups.set(key,x)}return [...groups.values()]}
-function cartageView(loads){return '<h3>Quarry loads &amp; cartage</h3>'+((loads||[]).map(l=>'<p>'+esc(l.date)+' · '+esc(l.material)+' · '+esc(l.supplier)+' · '+esc(l.tonnes)+' Ton · '+esc(l.reference||'')+'</p>'+(safePhoto(l.photo)?'<img style="width:100%;max-width:500px" src="'+safePhoto(l.photo)+'" alt="Weighbridge docket"><p><a download="weighbridge-docket.jpg" href="'+safePhoto(l.photo)+'">Download weighbridge photo</a></p>':'')).join('')||'<p>No individual loads recorded.</p>')+'<p>Total tonnes: '+(loads||[]).reduce((n,l)=>n+(Number(l.tonnes)||0),0).toFixed(2)+'</p>'}
+function cartageView(loads=[]){
+  return '<h3>Quarry loads &amp; cartage</h3>'+(loads.length?`<div class="tablewrap"><table style="width:100%;text-align:left">
+    <thead><tr><th scope="col">Date</th><th scope="col">Material / supplier</th><th scope="col">Tonnes</th><th scope="col">Docket</th></tr></thead>
+    <tbody>${loads.map(load=>`<tr><td>${esc(load.date)}</td><td>${esc(load.material)}<br><small>${esc(load.supplier)}</small></td>
+      <td>${esc(load.tonnes)}</td><td>${esc(load.reference||'')}${safePhoto(load.photo)?`<br><a download="weighbridge-docket.jpg" href="${safePhoto(load.photo)}">Download photo</a>`:''}</td></tr>`).join('')}</tbody>
+    <tfoot><tr><th scope="row" colspan="2">Total tonnes</th><td><strong>${loads.reduce((sum,load)=>sum+(Number(load.tonnes)||0),0).toFixed(2)}</strong></td><td></td></tr></tfoot>
+  </table></div>`+loads.filter(load=>safePhoto(load.photo)).map(load=>`<details><summary>Weighbridge photo · ${esc(load.reference||load.date)}</summary><img loading="lazy" style="width:100%;max-width:500px" src="${safePhoto(load.photo)}" alt="Weighbridge docket"></details>`).join(''):'<p>No individual loads recorded.</p>');
+}
 
 
 let machineColumns=[],legacyMaterials=[];
