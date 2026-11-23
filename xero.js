@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 
 const callback = 'https://swe-crew-hub.onrender.com/api/xero/callback';
 const origin = new URL(callback).origin;
-const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+const draftContactName = 'SWE Draft – Select Customer';
 
 function validDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -116,7 +116,7 @@ export function registerXero({app,db,auth,manager,readJobCosting}) {
     }
   };
   app.get('/api/xero/status',auth,manager,handle((req,res)=>{
-    res.json({configured,connected:configured&&Boolean(connection()),selected:Boolean(connection()?.tenant)});
+    res.json({configured,connected:configured&&Boolean(connection()),tenant:connection()?.tenant??null});
   }));
   app.post('/api/xero/connect',auth,manager,handle((req,res)=>{
     if (!configured) throw Error('The Xero credentials are missing from the Crew Hub service.');
@@ -166,35 +166,30 @@ export function registerXero({app,db,auth,manager,readJobCosting}) {
     db.prepare('UPDATE xero_connection SET tenant=? WHERE id=1').run(match.id);
     res.json(match);
   }));
-  app.get('/api/xero/accounts',auth,manager,handle(async(req,res)=>{
-    const data=await accounting('Accounts');
-    res.json(data.Accounts.filter(item=>item.Status==='ACTIVE'&&['REVENUE','SALES','OTHERINCOME'].includes(item.Type)&&item.Code).map(item=>({code:item.Code,name:item.Name})));
-  }));
-  app.get('/api/xero/contacts',auth,manager,handle(async(req,res)=>{
-    const search=String(req.query.search||'').trim().slice(0,100);
-    if (!search) return res.json([]);
-    const query=new URLSearchParams({searchTerm:search,page:'1'});
-    const data=await accounting('Contacts?'+query);
-    res.json(data.Contacts.filter(item=>item.ContactStatus==='ACTIVE').map(item=>({id:item.ContactID,name:item.Name})));
-  }));
-  function preview(req) {
+  async function preview(req) {
     const tenant=connection()?.tenant;
-    if (!configured || !tenant || req.body.tenant!==tenant) throw Error('Select your Xero organisation again.');
+    if (!configured || !tenant || req.body.tenant!==tenant) throw Error('Select your Xero organisation first.');
     const costing=readJobCosting(req.params.id);
-    const {from,to,contact,account,dueDate,includeExtras}=req.body;
-    if (!uuid.test(contact||'') || typeof account!=='string'||!account.trim()||account.length>30) throw Error('Choose a Xero customer and sales account.');
-    const date=new Intl.DateTimeFormat('sv-SE',{timeZone:'Australia/Melbourne',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-    if (!validDate(dueDate) || dueDate<date) throw Error('Choose an invoice due date on or after today.');
-    const draft=buildDraft(costing,{from,to,includeExtras:includeExtras===true});
-    const invoice={Type:'ACCREC',Status:'DRAFT',Contact:{ContactID:contact},Date:date,DueDate:dueDate,
+    const previous=db.prepare("SELECT MAX(end_day) AS through FROM xero_draft_requests WHERE job=? AND status='created'").get(costing.job.id).through;
+    const dates=costing.lines.filter(line=>line.day>=costing.job.start_day&&(!previous||line.day>previous)&&
+      (line.kind==='extra'||['submitted','approved'].includes(line.status))).map(line=>line.day).sort();
+    if (!dates.length) throw Error(previous?'No new eligible work after '+previous+'. Check Xero for the earlier draft.':'No submitted or approved work is available for a draft.');
+    const from=dates[0],to=dates.at(-1);
+    const draft=buildDraft(costing,{from,to,includeExtras:true});
+    const query=new URLSearchParams({where:'Name=="'+draftContactName+'"'});
+    const data=await accounting('Contacts?'+query);
+    const contact=data.Contacts?.find(item=>item.Name===draftContactName&&item.ContactStatus==='ACTIVE');
+    if (!contact?.ContactID) throw Error('Create the one-time Xero contact "'+draftContactName+'" and try again.');
+    if (connection()?.tenant!==tenant) throw Error('The Xero organisation changed. Open the preview again.');
+    const invoice={Type:'ACCREC',Status:'DRAFT',Contact:{ContactID:contact.ContactID},
       LineAmountTypes:'Exclusive',Reference:(costing.job.name+' | '+from+' to '+to).slice(0,255),
-      LineItems:draft.lines.map(line=>({Description:line.description,Quantity:line.quantity,UnitAmount:line.rate,AccountCode:account}))};
+      LineItems:draft.lines.map(line=>({Description:line.description,Quantity:line.quantity,UnitAmount:line.rate}))};
     const proof=crypto.createHmac('sha256',key).update(JSON.stringify([req.user.id,tenant,costing.job.id,from,to,invoice])).digest('hex');
-    return {...draft,proof,invoice,tenant,from,to,job:costing.job.id};
+    return {...draft,proof,invoice,tenant,from,to,job:costing.job.id,previous};
   }
-  app.post('/api/xero/job/:id/preview',auth,manager,handle((req,res)=>{
-    const {lines,excluded,proof,invoice}=preview(req);
-    res.json({lines,excluded,proof,reference:invoice.Reference,date:invoice.Date});
+  app.post('/api/xero/job/:id/preview',auth,manager,handle(async(req,res)=>{
+    const {lines,excluded,proof,invoice,previous}=await preview(req);
+    res.json({lines,excluded,proof,reference:invoice.Reference,previous});
   }));
   const reserve=db.transaction((draft,id)=>{
     const existing=db.prepare('SELECT * FROM xero_draft_requests WHERE job=? AND start_day<=? AND end_day>=? AND status<>?').get(draft.job,draft.to,draft.from,'failed');
@@ -209,7 +204,9 @@ export function registerXero({app,db,auth,manager,readJobCosting}) {
   });
   app.post('/api/xero/job/:id/draft',auth,manager,handle(async(req,res)=>{
     if (req.get('Origin')!==origin) throw Error('Open the live Crew Hub to create a draft.');
-    const draft=preview(req);
+    const existing=typeof req.body.proof==='string'&&db.prepare("SELECT invoice_id,invoice_number FROM xero_draft_requests WHERE id=? AND job=? AND status='created'").get(req.body.proof,Number(req.params.id));
+    if (existing) return res.json({invoiceId:existing.invoice_id,invoiceNumber:existing.invoice_number});
+    const draft=await preview(req);
     if (req.body.proof!==draft.proof) throw Error('The preview or connection changed. Review the invoice again.');
     const id=draft.proof;
     await access();
