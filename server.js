@@ -1,3 +1,4 @@
+import { registerXero } from './xero.js';
 import express from 'express';
 import webpush from 'web-push';
 import Database from 'better-sqlite3';
@@ -157,7 +158,7 @@ function docketLoadCost(load,r,rates){
     issue:validQuantity?undefined:'Missing load volume',
     status:r.status,record_id:r.id};
 }
-app.get('/api/costing/job/:id',auth,manager,(req,res)=>{try{res.set('Cache-Control','no-store');let j=db.prepare('SELECT j.*,c.name FROM costing_jobs j JOIN catalog c ON c.id=j.catalog_id WHERE j.id=?').get(req.params.id);if(!j)throw Error('Job not found');let rates=new Map(db.prepare('SELECT * FROM costing_rates').all().map(r=>[JSON.stringify([r.kind,r.name,r.unit]),r.rate])),lines=[],machineHours=[],materialQuantities=[];for(let r of db.prepare("SELECT id,date,week,status,data FROM records WHERE type='docket'").all()){let d=JSON.parse(r.data);const matchesName=costNorm(d.job)===costNorm(j.name);
+function readJobCosting(id){let j=db.prepare('SELECT j.*,c.name FROM costing_jobs j JOIN catalog c ON c.id=j.catalog_id WHERE j.id=?').get(id);if(!j)throw Error('Job not found');let rates=new Map(db.prepare('SELECT * FROM costing_rates').all().map(r=>[JSON.stringify([r.kind,r.name,r.unit]),r.rate])),lines=[],machineHours=[],materialQuantities=[];for(let r of db.prepare("SELECT id,date,week,status,data FROM records WHERE type='docket'").all()){let d=JSON.parse(r.data);const matchesName=costNorm(d.job)===costNorm(j.name);
 const matchesProject=d.job_catalog_id?Number(d.job_catalog_id)===j.catalog_id:matchesName;
 if(matchesProject){
   machineHours.push(...docketQuantities(d.machines||[],'machine','hours'));
@@ -169,7 +170,10 @@ if(!matchesProject)continue;
 const loadCosts=(d.loads||[]).map(load=>docketLoadCost(load,r,rates)).filter(Boolean);
 lines.push(...loadCosts.filter(line=>line.day>=j.start_day));
 const costMaterials=(d.materials||[]).filter(item=>!loadCosts.length||!item.fromCartage);
-for(let [kind,items] of [['machine',d.machines||[]],['material',costMaterials]])for(let x of items){let unit=costUnit(x.unit||(kind==='machine'?'hours':'tonnes')),key=JSON.stringify([kind,costNorm(x.name),unit]),rate=rates.get(key);let daily=Array.isArray(x.daily)?x.daily:[x.qty];for(let i=0;i<daily.length&&i<7;i++){let qty=Number(daily[i]);if(!Number.isFinite(qty)||qty<=0)continue;let dt=new Date(Date.parse(r.week||r.date)+i*86400000);if(!Number.isFinite(+dt))continue;let day=dt.toISOString().slice(0,10);if(day<j.start_day)continue;lines.push({day,kind,name:x.name,unit,qty,rate:rate??null,amount:rate===undefined?null:qty*rate,status:r.status,record_id:r.id})}}}for(let x of db.prepare('SELECT * FROM costing_extras WHERE job_id=?').all(j.id))lines.push({day:x.day,kind:'extra',name:x.label,amount:x.amount,status:'manual'});res.json({job:j,lines,machineHours,materialQuantities})}catch(e){fail(res,e)}});
+for(let [kind,items] of [['machine',d.machines||[]],['material',costMaterials]])for(let x of items){let unit=costUnit(x.unit||(kind==='machine'?'hours':'tonnes')),key=JSON.stringify([kind,costNorm(x.name),unit]),rate=rates.get(key);let daily=Array.isArray(x.daily)?x.daily:[x.qty];for(let i=0;i<daily.length&&i<7;i++){let qty=Number(daily[i]);if(!Number.isFinite(qty)||qty<=0)continue;let dt=new Date(Date.parse(r.week||r.date)+i*86400000);if(!Number.isFinite(+dt))continue;let day=dt.toISOString().slice(0,10);if(day<j.start_day)continue;lines.push({day,kind,name:x.name,unit,qty,rate:rate??null,amount:rate===undefined?null:qty*rate,status:r.status,record_id:r.id})}}}for(let x of db.prepare('SELECT * FROM costing_extras WHERE job_id=?').all(j.id))lines.push({day:x.day,kind:'extra',name:x.label,amount:x.amount,status:'manual'});return {job:j,lines,machineHours,materialQuantities};
+}
+app.get('/api/costing/job/:id',auth,manager,(req,res)=>{try{res.set('Cache-Control','no-store');res.json(readJobCosting(req.params.id))}catch(e){fail(res,e)}});
+registerXero({app,db,auth,manager,readJobCosting});
 
 
 db.exec("CREATE TABLE IF NOT EXISTS equipment_costs(equipment_id INTEGER PRIMARY KEY,data TEXT NOT NULL)");
