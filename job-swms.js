@@ -65,13 +65,20 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       return {...row,status,version};
     }));
   }));
-  app.post('/api/job-swms',auth,manager,route((req,res)=>{
-    const {jobId,documentId,required}=req.body;
+  const start=db.transaction((jobId,documentId,required,userId)=>{
+    if(!Number.isSafeInteger(jobId)||!Number.isSafeInteger(documentId))throw Error('Select a project and SWMS.');
     if(!db.prepare("SELECT id FROM catalog WHERE id=? AND kind='job' AND active=1").get(jobId??null))throw Error('Select an active job.');
     if(!db.prepare('SELECT id FROM swms_documents WHERE id=? AND deleted_at IS NULL').get(documentId??null))throw Error('Select an available SWMS.');
-    db.prepare('INSERT OR IGNORE INTO job_swms(job_id,document_id,required,assigned_by) VALUES (?,?,?,?)').run(jobId,documentId,required===true?1:0,req.user.id);
-    const saved=db.prepare('SELECT id FROM job_swms WHERE job_id=? AND document_id=?').get(jobId,documentId);
-    res.json(saved);
+    db.prepare('INSERT INTO job_swms(job_id,document_id,required,assigned_by) VALUES (?,?,?,?) ON CONFLICT(job_id,document_id) DO UPDATE SET required=1 WHERE excluded.required=1').run(jobId,documentId,required?1:0,userId);
+    return db.prepare('SELECT id FROM job_swms WHERE job_id=? AND document_id=?').get(jobId,documentId);
+  });
+  app.post('/api/job-swms',auth,manager,route((req,res)=>{
+    const {jobId,documentId,required}=req.body;
+    res.json(start.immediate(jobId,documentId,required===true,req.user.id));
+  }));
+  app.post('/api/job-swms/start',auth,route((req,res)=>{
+    const {jobId,documentId}=req.body;
+    res.json(start.immediate(jobId,documentId,false,req.user.id));
   }));
   app.get('/api/job-swms/:id',auth,route((req,res)=>{
     const row=assignment(req.params.id);
