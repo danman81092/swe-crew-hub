@@ -16,7 +16,7 @@ function textField(form, name) {
   return field instanceof PDFTextField ? field : undefined;
 }
 
-export async function completedSwmsPdf(source, job, version, details, signatures) {
+export async function completedSwmsPdf(source, job, version, details, signatures, supervisor) {
   const pdf = await PDFDocument.load(source);
   const form = pdf.getForm();
   if (!Object.keys(fields).every(name => textField(form, name)) ||
@@ -29,6 +29,14 @@ export async function completedSwmsPdf(source, job, version, details, signatures
   const signedAt = value => new Intl.DateTimeFormat('en-AU',{
     timeZone:'Australia/Melbourne',dateStyle:'short',timeStyle:'short'
   }).format(new Date(value.replace(' ','T')+'Z'));
+  if (supervisor) {
+    const signatureField = textField(form, 'Supervisor Name and Signature');
+    const dateField = textField(form, 'Supervisor Date and Time');
+    if (!signatureField || !dateField) return null;
+    const png = await pdf.embedPng(Buffer.from(supervisor.signature.split(',')[1], 'base64'));
+    signatureField.setImage(png);
+    dateField.setText(signedAt(supervisor.signed_at));
+  }
   for (const [index, worker] of signatures.entries()) {
     const png = await pdf.embedPng(Buffer.from(worker.signature.split(',')[1], 'base64'));
     if (index < 8) {

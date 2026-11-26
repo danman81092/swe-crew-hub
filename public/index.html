@@ -377,7 +377,7 @@ async function notificationsPage(){
   try{
     const alerts=await api('/job-swms/notifications');
     if(!list.isConnected)return;
-    list.innerHTML=alerts.map(alert=>`<div class="line"><b>${alert.ready?'SWMS to sign':'SWMS assigned'}</b>
+    list.innerHTML=alerts.map(alert=>`<div class="line"><b>${alert.supervisor?'Supervisor sign-off required':alert.ready?'SWMS to sign':'SWMS assigned'}</b>
       <p>${esc(alert.title)} · ${esc(alert.job)}</p>
       ${alert.ready?'':'<p>Site details need to be saved before you can sign.</p>'}
       <button type="button" class="alt" onclick="openJobSwms(${alert.id},null,true)">Open SWMS</button></div>`).join('')||'<p>No SWMS awaiting your signature.</p>';
@@ -572,14 +572,22 @@ async function openJobSwms(id,jobId,fromNotifications=false){
     const manager=me.role==='manager';
     const current=record.versions[0];
     const own=record.signed.some(worker=>worker.user_id===me.id);
+    const supervisorPending=record.details.supervisorId===me.id&&!record.supervisorSigned;
+    const signingAsSupervisor=own&&supervisorPending;
     panel.innerHTML=`<button class="alt" onclick="${fromNotifications?"go('notifications')":`jobSwmsPage(${jobId||'null'},${record.job_id})`}">← ${fromNotifications?'Notifications':'Saved SWMS'}</button>
       <h2>${esc(record.title)}</h2><p>${esc(record.job)} · ${esc(record.status)}${record.required?' · Required before work starts':''}</p>
       <p><button type="button" class="alt" id="job-swms-master">Download approved SWMS PDF</button></p>
       <form id="job-swms-details"><h3>Site details</h3>
-      ${['site','date','supervisor','emergency','contractor'].map(key=>`<label for="swms-detail-${key}">${jobSwmsLabels[key]}${key==='contractor'?' (if applicable)':''}</label>
-        ${record.details[key]?.includes('\n')
+      ${['site','date','supervisor','contractor'].map(key=>`<label for="swms-detail-${key}">${jobSwmsLabels[key]}${key==='contractor'?' (if applicable)':''}</label>
+        ${key==='supervisor'?`<input id="swms-detail-supervisor" name="supervisor" list="swms-supervisors" autocomplete="off">
+          <datalist id="swms-supervisors">${record.supervisors.map(person=>`<option value="${esc(person.name)}"></option>`).join('')}</datalist>`:record.details[key]?.includes('\n')
           ?`<textarea id="swms-detail-${key}" name="${key}" maxlength="3000" rows="2"></textarea>`
           :`<input id="swms-detail-${key}" name="${key}" type="${key==='date'?'date':'text'}" ${key==='date'?'':'maxlength="3000"'}>`}`).join('')}
+      <details ${record.details.emergency?'open':''}>
+        <summary>Emergency and assembly point (optional)</summary>
+        <label for="swms-detail-emergency">Emergency and assembly point</label>
+        <textarea id="swms-detail-emergency" name="emergency" maxlength="3000" rows="2"></textarea>
+      </details>
       <details ${record.details.hazards||record.details.controls?'open':''}>
         <summary>Site-specific hazards and controls</summary>
         <p>Add any hazards or controls specific to this job before signing.</p>
@@ -591,14 +599,18 @@ async function openJobSwms(id,jobId,fromNotifications=false){
       <h3>Current sign-off</h3>
       ${record.signed.map(worker=>`<p>${esc(worker.name)} · ${esc(worker.role)} · ${esc(displayStamp(worker.signed_at))}</p>`).join('')||'<p>No workers have signed this version.</p>'}
       ${record.missing.length?'<p>Still to sign: '+record.missing.map(worker=>esc(worker.name)).join(', ')+'</p>':''}
+      ${record.supervisorSigned?`<p>Supervisor signed · ${esc(record.supervisorSigned.name)} · ${esc(displayStamp(record.supervisorSigned.signed_at))}</p>`:
+        record.details.supervisorId?`<p>Supervisor signature pending · ${esc(record.details.supervisor)}</p>`:''}
       ${manager?`<form id="job-swms-worker"><label for="job-swms-worker-select">Add a worker to the sign-off list</label>
         <select name="worker" id="job-swms-worker-select" required><option value="">Select worker</option>
         ${users.filter(user=>user.active&&(user.role==='employee'||user.id===me.id)&&!record.workers.some(worker=>worker.id===user.id)).map(user=>`<option value="${user.id}">${esc(user.name)}</option>`).join('')}</select>
         <button type="submit">Add worker</button></form>`:''}
-      ${!own?`<form id="job-swms-sign"><label for="job-swms-role">Your work role</label><input id="job-swms-role" name="role" maxlength="100" required>
+      ${(!own||signingAsSupervisor)?`<form id="job-swms-sign" ${signingAsSupervisor?'data-supervisor-sign':''}><h3>${signingAsSupervisor?'Supervisor signature':'General signature'}</h3>
+        ${supervisorPending&&!own?'<p>Save your general signature first. You’ll then be prompted to sign as supervisor.</p>':''}
+        ${signingAsSupervisor?'':'<label for="job-swms-role">Your work role</label><input id="job-swms-role" name="role" maxlength="100" required>'}
         <label><input name="reviewed" type="checkbox" required style="width:auto;min-height:0"> I have read the master SWMS and this version’s site details and controls.</label>
         <canvas id="sig" class="signature" aria-label="Draw your signature"></canvas>
-        <button type="button" class="alt" onclick="clearSig()">Clear signature</button><button type="submit">Save and sign SWMS</button></form>`:''}
+        <button type="button" class="alt" onclick="clearSig()">Clear signature</button><button type="submit">${signingAsSupervisor?'Sign as supervisor':'Save and sign SWMS'}</button></form>`:''}
       ${current&&(manager||own||record.workers.some(worker=>worker.id===me.id))?`<button type="button" class="alt" data-completed-swms="${current.version}">Download filled SWMS PDF</button>`:''}
       ${current&&manager?'<button class="alt" id="job-swms-print">Print / save sign-off PDF</button>':''}
       ${record.versions.length>1?`<h3>Previous versions</h3>${record.versions.slice(1).map(version=>`<details><summary>Version ${version.version} · Superseded · ${version.signed.length} signatures</summary>
@@ -615,6 +627,8 @@ async function openJobSwms(id,jobId,fromNotifications=false){
         await save(new FormData(form));
         if(panel.isConnected){
           await openJobSwms(id,jobId,fromNotifications);
+          const supervisorForm=$('#job-swms-sign[data-supervisor-sign]');
+          if(message==='General signature saved'&&supervisorForm)supervisorForm.scrollIntoView({block:'start'});
           if(message&&$('#job-swms-details'))notify(message);
         }
       }
@@ -631,9 +645,14 @@ async function openJobSwms(id,jobId,fromNotifications=false){
     if(signForm){signature='';setupSig();}
     saveForm(signForm,data=>{
       if(!signature)throw Error('Draw your signature before signing.');
-      return post('/job-swms/'+id+'/sign',{version:record.version,role:data.get('role'),reviewed:data.get('reviewed')==='on',
-        signature:$('#sig').toDataURL('image/png'),details:changed()?Object.fromEntries(new FormData(details)):undefined});
-    },'SWMS saved and signed');
+      const payload={version:record.version,reviewed:data.get('reviewed')==='on',signature:$('#sig').toDataURL('image/png')};
+      if(signingAsSupervisor){
+        ensureSaved();
+        return post('/job-swms/'+id+'/supervisor-sign',payload);
+      }
+      return post('/job-swms/'+id+'/sign',{...payload,role:data.get('role'),
+        details:changed()?Object.fromEntries(new FormData(details)):undefined});
+    },signingAsSupervisor?'Supervisor signature saved':'General signature saved');
     panel.querySelectorAll('[data-completed-swms]').forEach(button=>{
       const version=button.dataset.completedSwms;
       button.onclick=()=>openSwmsPdf(button,`/api/job-swms/${id}/versions/${version}/pdf`,`${record.title} - ${record.job} - v${version}`);

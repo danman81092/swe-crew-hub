@@ -22,6 +22,13 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       user_id INTEGER NOT NULL REFERENCES users(id),
       PRIMARY KEY(assignment_id,user_id)
     );
+    CREATE TABLE IF NOT EXISTS job_swms_supervisor_signatures (
+      assignment_id INTEGER NOT NULL, version INTEGER NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, signature TEXT NOT NULL,
+      signed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(assignment_id,version),
+      FOREIGN KEY(assignment_id,version) REFERENCES job_swms_versions(assignment_id,version)
+    );
     CREATE TABLE IF NOT EXISTS job_swms_signatures (
       assignment_id INTEGER NOT NULL, version INTEGER NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id),
       name TEXT NOT NULL, role TEXT NOT NULL, signature TEXT NOT NULL,
@@ -41,21 +48,25 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
   const signatures=(id,version,viewer)=>db.prepare(`SELECT user_id,name,role,signed_at,
     CASE WHEN ? OR user_id=? THEN signature END AS signature FROM job_swms_signatures
     WHERE assignment_id=? AND version=? ORDER BY signed_at,user_id`).all(viewer.role==='manager'?1:0,viewer.id,id,version);
+  const supervisorSignOff=(id,version,includeImage=false)=>db.prepare(`SELECT user_id,name,signed_at,
+    CASE WHEN ? THEN signature END AS signature FROM job_swms_supervisor_signatures
+    WHERE assignment_id=? AND version=?`).get(includeImage?1:0,id,version);
   const summary=(row,viewer)=>{
     const current=latest(row.id);
     const workers=pendingWorkers(row.id);
     const signed=current?signatures(row.id,current.version,viewer):[];
     const missing=workers.filter(worker=>!signed.some(person=>person.user_id===worker.id));
     const details=current?JSON.parse(current.details):{};
+    const supervisorSigned=current?supervisorSignOff(row.id,current.version):null;
     let status='Not started';
     if(current){
       if(!complete(details))status='Details required';
       else if(current.version>1&&!signed.length)status='Review required';
-      else status=signed.length&&!missing.length?'Current':'Awaiting signatures';
+      else status=signed.length&&!missing.length&&(!details.supervisorId||supervisorSigned)?'Current':'Awaiting signatures';
     }
-    return {...row,status,version:current?.version||0,details,workers,missing,signed};
+    return {...row,status,version:current?.version||0,details,workers,missing,signed,supervisorSigned};
   };
-  function complete(details){return details.site&&details.date&&details.supervisor&&details.emergency}
+  function complete(details){return details.site&&details.date&&details.supervisor}
   const route=fn=>(req,res)=>{
     res.set('Cache-Control','no-store');
     try{fn(req,res)}catch(error){fail(res,error)}
@@ -68,12 +79,16 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     }));
   }));
   app.get('/api/job-swms/notifications',auth,route((req,res)=>{
-    const rows=db.prepare(select+` JOIN job_swms_workers w ON w.assignment_id=a.id
-      WHERE w.user_id=? ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE`).all(req.user.id);
+    const rows=db.prepare(select+` WHERE EXISTS (
+      SELECT 1 FROM job_swms_workers w WHERE w.assignment_id=a.id AND w.user_id=?
+    ) OR ? = (SELECT json_extract(v.details,'$.supervisorId') FROM job_swms_versions v
+      WHERE v.assignment_id=a.id ORDER BY v.version DESC LIMIT 1)
+    ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE`).all(req.user.id,req.user.id);
     res.json(rows.flatMap(row=>{
-      const {details,missing}=summary(row,req.user);
-      return missing.some(worker=>worker.id===req.user.id)
-        ?[{id:row.id,title:row.title,job:row.job,ready:Boolean(complete(details))}]:[];
+      const {details,missing,supervisorSigned}=summary(row,req.user);
+      const supervisor=details.supervisorId===req.user.id&&!supervisorSigned;
+      return supervisor||missing.some(worker=>worker.id===req.user.id)
+        ?[{id:row.id,title:row.title,job:row.job,ready:Boolean(complete(details)),supervisor}]:[];
     }));
   }));
   const start=db.transaction((jobId,documentId,required,userId,projectName)=>{
@@ -105,7 +120,8 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     const record=summary(row,req.user);
     const versions=db.prepare('SELECT version,details,saved_at FROM job_swms_versions WHERE assignment_id=? ORDER BY version DESC').all(row.id)
       .map(item=>({...item,details:JSON.parse(item.details),signed:signatures(row.id,item.version,req.user)}));
-    res.json({...record,versions});
+    const supervisors=db.prepare('SELECT name FROM users WHERE active=1 ORDER BY name COLLATE NOCASE').all();
+    res.json({...record,versions,supervisors});
   }));
   app.get('/api/job-swms/:id/master',auth,route((req,res)=>{
     const row=assignment(req.params.id);
@@ -125,7 +141,7 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
         return res.status(403).json({error:'Only office staff and workers on this SWMS can download the completed PDF.'});
       }
       const document=await completedSwmsPdf(Buffer.from(source.pdf,'base64'),row.job,version.version,
-        JSON.parse(version.details),signatures(row.id,version.version,viewer));
+        JSON.parse(version.details),signatures(row.id,version.version,viewer),supervisorSignOff(row.id,version.version,true));
       if(!document)return res.status(422).json({error:'This PDF template does not have the supported SWMS fields.'});
       res.type('application/pdf').send(Buffer.from(document));
     }catch(error){fail(res,error)}
@@ -137,7 +153,7 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     if(current?.details===json)return;
     db.prepare('INSERT INTO job_swms_versions(assignment_id,version,details,saved_by) VALUES (?,?,?,?)').run(id,base+1,json,user);
   });
-  function cleanDetails(details){
+  function cleanDetails(details,previous){
     if(!details||typeof details!=='object'||Array.isArray(details))throw Error('Invalid SWMS details.');
     const fields=Object.fromEntries(swmsFields.map(key=>{
       const value=details[key]??'';
@@ -145,13 +161,17 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       return [key,value.trim()];
     }));
     if(fields.date&&(!/^\d{4}-\d{2}-\d{2}$/.test(fields.date)||!Number.isFinite(Date.parse(fields.date))||new Date(fields.date).toISOString().slice(0,10)!==fields.date))throw Error('Choose a valid work date.');
+    const supervisorId=fields.supervisor===previous?.supervisor&&previous.supervisorId||
+      db.prepare('SELECT id FROM users WHERE name=? COLLATE NOCASE AND active=1').get(fields.supervisor)?.id;
+    if(supervisorId)fields.supervisorId=supervisorId;
+    else if(fields.supervisor&&fields.supervisor!==previous?.supervisor)throw Error('Select a site supervisor from the Crew Hub account list.');
     return fields;
   }
   app.put('/api/job-swms/:id/details',auth,route((req,res)=>{
     const row=assignment(req.params.id);
     const {version,details}=req.body;
     if(!Number.isInteger(version))throw Error('Invalid SWMS version.');
-    const fields=cleanDetails(details);
+    const fields=cleanDetails(details,JSON.parse(latest(row.id)?.details||'{}'));
     save.immediate(row.id,version,fields,req.user.id);
     res.json({ok:true});
   }));
@@ -168,10 +188,10 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     if(details)save(id,version,details,user.id);
     const current=latest(id);
     if(!current)throw Error('Complete the site details before signing.');
-    if(!complete(JSON.parse(current.details)))throw Error('Complete the site, date, supervisor and emergency details first.');
+    if(!complete(JSON.parse(current.details)))throw Error('Complete the site, date and supervisor first.');
     db.prepare('INSERT OR IGNORE INTO job_swms_signatures(assignment_id,version,user_id,name,role,signature) VALUES (?,?,?,?,?,?)')
       .run(id,current.version,user.id,user.name,role,signature);
-    if(user.role==='employee')db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(id,user.id);
+    if(user.role==='employee'||JSON.parse(current.details).supervisorId===user.id)db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(id,user.id);
   });
   app.post('/api/job-swms/:id/sign',auth,route((req,res)=>{
     const row=assignment(req.params.id);
@@ -180,7 +200,27 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
        typeof signature!=='string'||signature.length>1000000||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature)){
       throw Error('Enter your work role and draw your signature.');
     }
-    sign.immediate(row.id,version,role.trim(),signature,req.user,details===undefined?undefined:cleanDetails(details));
+    sign.immediate(row.id,version,role.trim(),signature,req.user,details===undefined?undefined:cleanDetails(details,JSON.parse(latest(row.id)?.details||'{}')));
     res.json({ok:true});
   }));
+  const signSupervisor=db.transaction((id,version,signature,user)=>{
+    const current=latest(id);
+    if(!current||current.version!==version)throw Error('The SWMS has changed. Reopen and review the current version.');
+    const details=JSON.parse(current.details);
+    if(details.supervisorId!==user.id)throw Error('Only the selected site supervisor can sign here.');
+    if(!signatures(id,version,user).some(worker=>worker.user_id===user.id)){
+      throw Error('Complete your general signature first.');
+    }
+    db.prepare('INSERT OR IGNORE INTO job_swms_supervisor_signatures(assignment_id,version,user_id,name,signature) VALUES (?,?,?,?,?)')
+      .run(id,version,user.id,user.name,signature);
+  });
+  app.post('/api/job-swms/:id/supervisor-sign',auth,route((req,res)=>{
+    const row=assignment(req.params.id);
+    const {version,signature,reviewed}=req.body;
+    if(reviewed!==true||!Number.isInteger(version)||typeof signature!=='string'||signature.length>1000000||
+       !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature))throw Error('Confirm your review and draw your supervisor signature.');
+    signSupervisor.immediate(row.id,version,signature,req.user);
+    res.json({ok:true});
+  }));
+
 }
