@@ -371,6 +371,19 @@ function managementArchives(){let rs=records.filter(r=>r.type==='timesheet'&&r.d
 function openEmployeeArchive(id){officeMode='people';officeUser=id;officeFolder='archive';officeWeek=null;office()}
 
 async function formsPage(uid=null){try{let manager=me.role==='manager';if(manager&&!uid)return go('people');let rows=(await api('/site-forms')).filter(f=>!manager||f.user_id===uid);$('#screen').innerHTML='<section class="card"><button class="alt" onclick="'+(manager?'pickEmployee('+uid+')':"go('home')")+'">← Back</button><h2>Forms'+(manager?' · '+esc(users.find(u=>u.id===uid)?.name||''):'')+'</h2>'+(manager?'<button onclick="assignForm('+uid+')">+ Add form</button>':'<p>Forms assigned by the office.</p>')+'</section>'+[false,true].map(done=>'<section class="card"><h3>'+(done?'Completed forms':'Outstanding forms')+'</h3>'+(rows.filter(f=>!!f.completed_at===done).map(f=>'<div class="line"><b>'+esc(f.title)+'</b><p>'+esc(f.job||'')+'</p><p>'+esc(f.instructions||'')+'</p><a href="/api/site-forms/'+f.id+'/file" target="_blank" rel="noopener">Download original PDF</a><div class="actions">'+(done?'<button class="alt" onclick="formEvidence('+f.id+','+(uid||'null')+')">View submission</button>'+(f.has_return?'<a href="/api/site-forms/'+f.id+'/file?returned=1">Completed PDF</a>':''):manager?'<span class="pill">Awaiting completion</span>':'<button onclick="completeForm('+f.id+')">Complete & sign</button>')+'</div></div>').join('')||'<p>No forms.</p>')+'</section>').join('')}catch(e){notify(e.message,true)}}
+async function notificationsPage(){
+  $('#screen').innerHTML='<section class="card"><h2>Notifications</h2><div id="swms-alerts" aria-live="polite">Loading…</div></section>';
+  const list=$('#swms-alerts');
+  try{
+    const alerts=await api('/job-swms/notifications');
+    if(!list.isConnected)return;
+    list.innerHTML=alerts.map(alert=>`<div class="line"><b>${alert.ready?'SWMS to sign':'SWMS assigned'}</b>
+      <p>${esc(alert.title)} · ${esc(alert.job)}</p>
+      ${alert.ready?'':'<p>Site details need to be saved before you can sign.</p>'}
+      <button type="button" class="alt" onclick="openJobSwms(${alert.id},null,true)">Open SWMS</button></div>`).join('')||'<p>No SWMS awaiting your signature.</p>';
+  }catch(error){if(list.isConnected)list.textContent=error.message}
+}
+
 async function swmsPage(){
   const screen=$('#screen');
   screen.innerHTML=`<section class="card"><button class="alt" onclick="go('home')">← Dashboard</button>
@@ -526,7 +539,7 @@ function printJobSwms(record,version){
   if(tab.document.readyState==='complete')ready();else tab.addEventListener('load',ready,{once:true});
 }
 
-async function openJobSwms(id,jobId){
+async function openJobSwms(id,jobId,fromNotifications=false){
   $('#screen').innerHTML='<section class="card"><div id="job-swms-record">Loading SWMS…</div></section>';
   const panel=$('#job-swms-record');
   try{
@@ -536,7 +549,7 @@ async function openJobSwms(id,jobId){
     const current=record.versions[0];
     const own=record.signed.some(worker=>worker.user_id===me.id);
     const ready=['site','date','supervisor','emergency'].every(key=>record.details[key]);
-    panel.innerHTML=`<button class="alt" onclick="jobSwmsPage(${jobId||'null'},${record.job_id})">← Saved SWMS</button>
+    panel.innerHTML=`<button class="alt" onclick="${fromNotifications?"go('notifications')":`jobSwmsPage(${jobId||'null'},${record.job_id})`}">← ${fromNotifications?'Notifications':'Saved SWMS'}</button>
       <h2>${esc(record.title)}</h2><p>${esc(record.job)} · ${esc(record.status)}${record.required?' · Required before work starts':''}</p>
       <p><a href="/api/job-swms/${id}/master" target="_blank" rel="noopener">Open approved master SWMS PDF</a></p>
       <form id="job-swms-details"><h3>Site details</h3>
@@ -557,7 +570,7 @@ async function openJobSwms(id,jobId){
       ${record.missing.length?'<p>Still to sign: '+record.missing.map(worker=>esc(worker.name)).join(', ')+'</p>':''}
       ${manager?`<form id="job-swms-worker"><label for="job-swms-worker-select">Add a worker to the sign-off list</label>
         <select name="worker" id="job-swms-worker-select" required><option value="">Select worker</option>
-        ${users.filter(user=>user.active&&user.role==='employee'&&!record.workers.some(worker=>worker.id===user.id)).map(user=>`<option value="${user.id}">${esc(user.name)}</option>`).join('')}</select>
+        ${users.filter(user=>user.active&&(user.role==='employee'||user.id===me.id)&&!record.workers.some(worker=>worker.id===user.id)).map(user=>`<option value="${user.id}">${esc(user.name)}</option>`).join('')}</select>
         <button type="submit">Add worker</button></form>`:''}
       ${ready&&!own?`<form id="job-swms-sign"><label for="job-swms-role">Your work role</label><input id="job-swms-role" name="role" maxlength="100" required>
         <label><input name="reviewed" type="checkbox" required style="width:auto;min-height:0"> I have read the master SWMS and this version’s site details and controls.</label>
@@ -577,7 +590,7 @@ async function openJobSwms(id,jobId){
       try{
         await save(new FormData(form));
         if(panel.isConnected){
-          await openJobSwms(id,jobId);
+          await openJobSwms(id,jobId,fromNotifications);
           if(message&&$('#job-swms-details'))notify(message);
         }
       }
@@ -658,9 +671,9 @@ function printCompliance(id,day){printSafety('<h2>'+esc(projectName(id))+'</h2>'
 async function manageSafety(){await safetyLoad();$('#screen').innerHTML='<section class="card"><button class="alt" onclick="projectCompliance()">Back</button><h2>Clients &amp; projects</h2><button onclick="editSafety(\'client\',0,0)">+ Add client</button>'+safetyReg.clients.map(c=>'<div class="line"><b>'+esc(c.name)+'</b><button class="alt" onclick="editSafety(\'client\','+c.id+',0)">Edit</button><button class="alt" onclick="editSafety(\'project\',0,'+c.id+')">+ Project</button>'+safetyReg.projects.filter(p=>p.client_id===c.id).map(p=>'<p>'+esc(p.name)+(p.active?'':' (Archived)')+' <button class="alt" onclick="editSafety(\'project\','+p.id+','+c.id+')">Edit</button></p>').join('')+'</div>').join('')+'</section>'}
 async function editSafety(kind,id,cid){let x=(kind==='client'?safetyReg.clients:safetyReg.projects).find(x=>x.id===id),name=prompt('Name',x?.name||'');if(!name)return;let active=x?confirm('Keep active? OK = active, Cancel = archived'):true;try{await post('/safety-register',{kind,id,name,client_id:cid,active});await manageSafety()}catch(e){notify(e.message,true)}}
 
-function setupNav(){let manager=me.role==='manager';$('#nav').innerHTML=(manager?[['home','⌂','Home'],['people','♟','Employees'],['approvals','✓','Approvals'],['jobs','▤','Jobs'],['settings','⚙','Settings']]:[['home','⌂','Home'],['timesheet','◷','Timesheet'],['docket','<svg class="excavator-icon" viewBox="0 0 64 48" width="38" height="32" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 36h30M12 31h20l4 5H8zM14 29V18h13l6 11zM18 18v-6h9l4 6M34 17l8-12 9 3 5 18M56 26l-4 9-8-3 2-6M34 17l-5 7"/><rect x="7" y="37" width="32" height="7" rx="3"/><circle cx="14" cy="40.5" r="1"/><circle cx="32" cy="40.5" r="1"/></svg>','Plant & Materials'],['history','◴','History'],['licences','▣','Licences']]).map(([id,icon,label])=>'<button id="n-'+id+'" onclick="go(\''+id+'\')"><b>'+icon+'</b>'+label+'</button>').join('')}
+function setupNav(){let manager=me.role==='manager';$('#nav').innerHTML=(manager?[['home','⌂','Home'],['people','♟','Employees'],['approvals','✓','Approvals'],['jobs','▤','Jobs'],['settings','⚙','Settings'],['notifications','♧','Notifications']]:[['home','⌂','Home'],['timesheet','◷','Timesheet'],['docket','<svg class="excavator-icon" viewBox="0 0 64 48" width="38" height="32" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 36h30M12 31h20l4 5H8zM14 29V18h13l6 11zM18 18v-6h9l4 6M34 17l8-12 9 3 5 18M56 26l-4 9-8-3 2-6M34 17l-5 7"/><rect x="7" y="37" width="32" height="7" rx="3"/><circle cx="14" cy="40.5" r="1"/><circle cx="32" cy="40.5" r="1"/></svg>','Plant & Materials'],['history','◴','History'],['licences','▣','Licences'],['notifications','♧','Notifications']]).map(([id,icon,label])=>'<button id="n-'+id+'" onclick="go(\''+id+'\')"><b>'+icon+'</b>'+label+'</button>').join('')}
 
-function go(p){if(p==='costing'&&me?.role==='manager')return costingPage();if(p==='forms')return formsPage();if(p==='swms')return swmsPage();if(p==='toolbox')return toolboxPage();if(p==='projectcompliance')return projectCompliance();if(p==='services')return serviceTracker();if(p==='plant')return plantPage();if(me?.role==='manager'&&['timesheet','docket','history'].includes(p))p='home';page=p;document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));$('#n-'+p)?.classList.add('active');if(p==='home')home();if(p==='timesheet')timesheet();if(p==='docket')docket();if(p==='history')submissionsHistory();if(p==='licences'&&me.role==='employee')qualificationPage();if(p==='office')office();if(me.role==='manager'){if(['people','jobs','settings'].includes(p))officeReset(p);if(p==='approvals')pendingTimesheets();if(p==='payroll')managementPayroll();if(p==='archives')managementArchives();if(p==='compliance')qualificationPage()}}
+function go(p){if(p==='costing'&&me?.role==='manager')return costingPage();if(p==='forms')return formsPage();if(p==='swms')return swmsPage();if(p==='toolbox')return toolboxPage();if(p==='projectcompliance')return projectCompliance();if(p==='services')return serviceTracker();if(p==='plant')return plantPage();if(me?.role==='manager'&&['timesheet','docket','history'].includes(p))p='home';page=p;document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));$('#n-'+p)?.classList.add('active');if(p==='home')home();if(p==='notifications')return notificationsPage();if(p==='timesheet')timesheet();if(p==='docket')docket();if(p==='history')submissionsHistory();if(p==='licences'&&me.role==='employee')qualificationPage();if(p==='office')office();if(me.role==='manager'){if(['people','jobs','settings'].includes(p))officeReset(p);if(p==='approvals')pendingTimesheets();if(p==='payroll')managementPayroll();if(p==='archives')managementArchives();if(p==='compliance')qualificationPage()}}
 function login(){ $('#screen').innerHTML=`<section class="card" style="max-width:430px;margin:50px auto"><h2>Welcome to SWE Crew</h2><p>Enter your employee name and 4-digit PIN.</p><form id="loginform"><label>Employee name</label><input id="username" required autocomplete="username" placeholder="e.g. Brandon"><label>4-digit PIN</label><input id="pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required autocomplete="current-password"><div class="actions"><button>Sign in →</button></div></form></section>`;$('#loginform').onsubmit=async e=>{e.preventDefault();try{me=await post('/login',{name:$('#username').value,pin:$('#pin').value});await start()}catch(err){notify(err.message,true)}}}
 async function start(){await refresh();$('#logout').style.display='block';updateHeaderIdentity();$('#nav').classList.remove('hidden');setupNav();go('home');if(me.role==='employee')registerMorningOnHome()}
 function updateHeaderIdentity(){let name=document.getElementById('headerUserName'),role=document.getElementById('headerUserRole');if(!name||!role)return;name.textContent=me?.name||'My Account';role.textContent=me?.role==='manager'?'Management':'Crew Member'}

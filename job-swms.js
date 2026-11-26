@@ -65,6 +65,15 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       return {...row,status,version};
     }));
   }));
+  app.get('/api/job-swms/notifications',auth,route((req,res)=>{
+    const rows=db.prepare(select+` JOIN job_swms_workers w ON w.assignment_id=a.id
+      WHERE w.user_id=? ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE`).all(req.user.id);
+    res.json(rows.flatMap(row=>{
+      const {details,missing}=summary(row,req.user);
+      return missing.some(worker=>worker.id===req.user.id)
+        ?[{id:row.id,title:row.title,job:row.job,ready:Boolean(complete(details))}]:[];
+    }));
+  }));
   const start=db.transaction((jobId,documentId,required,userId,projectName)=>{
     if(projectName!==undefined){
       if(jobId!==undefined||typeof projectName!=='string')throw Error('Enter a project name.');
@@ -124,7 +133,7 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
   }));
   app.post('/api/job-swms/:id/workers',auth,manager,route((req,res)=>{
     const row=assignment(req.params.id);
-    const user=db.prepare("SELECT id FROM users WHERE id=? AND active=1 AND role='employee'").get(req.body.userId??null);
+    const user=db.prepare("SELECT id FROM users WHERE id=? AND active=1 AND (role='employee' OR id=?)").get(req.body.userId??null,req.user.id);
     if(!user)throw Error('Select an active worker.');
     db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(row.id,user.id);
     res.json({ok:true});
