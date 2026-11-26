@@ -374,13 +374,13 @@ async function formsPage(uid=null){try{let manager=me.role==='manager';if(manage
 async function swmsPage(){
   const screen=$('#screen');
   screen.innerHTML=`<section class="card"><button class="alt" onclick="go('home')">← Dashboard</button>
-    <h2>SWMS</h2><button class="alt" onclick="jobSwmsPage()">Start or find project SWMS</button>
-    ${me.role==='manager'?`<form id="swms-upload">
+    <h2>SWMS</h2><button class="alt" onclick="jobSwmsPage()">Saved SWMS</button>
+    ${me.role==='manager'?`<details><summary>Upload a SWMS template</summary><form id="swms-upload">
       <label for="swms-title">Document title</label><input id="swms-title" name="title" maxlength="200" required>
       <label for="swms-file">PDF (up to 3 MB)</label><input id="swms-file" name="file" type="file" accept="application/pdf,.pdf" required>
       <button type="submit">Upload SWMS</button>
-    </form>`:''}
-    <div id="swms-documents" aria-live="polite">Loading SWMS…</div></section>`;
+    </form></details>`:''}
+    <h3>SWMS templates</h3><div id="swms-documents" aria-live="polite">Loading SWMS…</div></section>`;
   const list=$('#swms-documents');
   const form=$('#swms-upload');
   if(form){
@@ -403,7 +403,7 @@ async function swmsPage(){
     const documents=await api('/swms');
     if(!list.isConnected)return;
     list.innerHTML=documents.map(document=>`<div class="line"><b>${esc(document.title)}</b>
-      <div class="actions"><a href="/api/swms/${document.id}/file" target="_blank" rel="noopener">Open PDF</a>
+      <div class="actions"><button type="button" onclick="jobSwmsPage(null,null,${document.id})">Fill out</button><a href="/api/swms/${document.id}/file" target="_blank" rel="noopener">Open PDF</a>
       <a href="/api/swms/${document.id}/file?download=1">Download PDF</a>
       ${me.role==='manager'?`<button type="button" class="danger" onclick="deleteSwms(this,${document.id})">Delete</button>`:''}</div></div>`).join('')||'<p>No SWMS uploaded yet.</p>';
   }catch(error){if(list.isConnected)list.textContent=error.message}
@@ -412,13 +412,19 @@ async function swmsPage(){
 const jobSwmsLabels={site:'Site / address',contractor:'Principal contractor',date:'Work date',supervisor:'Site supervisor',
   emergency:'Emergency and assembly point',hazards:'New or changed hazards',controls:'Additional controls'};
 
-async function jobSwmsPage(jobId=null,projectFilter=''){
+async function jobSwmsPage(jobId=null,projectFilter='',templateId=null){
   $('#screen').innerHTML=`<section class="card"><button class="alt" onclick="${jobId&&me.role==='manager'?'office()':'swmsPage()'}">← Back</button>
-    <h2>Project SWMS</h2><div id="job-swms-list" aria-live="polite">Loading…</div></section>`;
+    <h2>${templateId?'Fill out SWMS':'Saved SWMS'}</h2><div id="job-swms-list" aria-live="polite">Loading…</div></section>`;
   const panel=$('#job-swms-list');
   try{
-    const [assigned,documents,catalog]=await Promise.all([api('/job-swms'),api('/swms'),api('/catalog')]);
+    const canAssign=jobId&&me.role==='manager';
+    const canStart=templateId||canAssign;
+    const [assigned,documents,catalog]=await Promise.all([
+      api('/job-swms'),canStart?api('/swms'):[],canStart?api('/catalog'):[]
+    ]);
     if(!panel.isConnected)return;
+    const template=documents.find(document=>document.id===templateId);
+    if(templateId&&!template)throw Error('This template is no longer available. Go back to choose another SWMS.');
     const jobs=catalog.filter(item=>item.kind==='job'&&(!jobId||item.id===jobId));
     const rows=jobId?assigned.filter(row=>row.job_id===jobId):assigned;
     const projects=new Map();
@@ -427,22 +433,27 @@ async function jobSwmsPage(jobId=null,projectFilter=''){
       projects.get(row.job_id).records.push(row);
     }
 
-    panel.innerHTML=`<details id="start-project-swms" ${rows.length?'':'open'}><summary>Start a SWMS</summary>
+    panel.innerHTML=(canStart?`${template?`<h3>${esc(template.title)}</h3>`:'<details><summary>Assign a SWMS to this job</summary>'}
       <form id="start-project-swms-form">
         <label for="swms-project">Project</label><select id="swms-project" name="project" required>
           <option value="">Select project</option>${jobs.map(job=>`<option value="${job.id}">${esc(job.name)}</option>`).join('')}
+          ${jobId?'':'<option value="new">+ New project</option>'}
         </select>
-        <label for="job-swms-template">Approved SWMS</label><select id="job-swms-template" name="document" required>
+        <div id="swms-new-project" hidden>
+          <label for="swms-project-name">New project name</label>
+          <input id="swms-project-name" name="projectName" maxlength="200" disabled>
+        </div>
+        ${template?`<input type="hidden" name="document" value="${template.id}">`:`<label for="job-swms-template">Approved SWMS</label><select id="job-swms-template" name="document" required>
           <option value="">Select SWMS</option>${documents.map(document=>`<option value="${document.id}">${esc(document.title)}</option>`).join('')}
-        </select>
-        ${me.role==='manager'?'<label><input type="checkbox" name="required" checked style="width:auto;min-height:0"> Required before work starts</label>':''}
-        <button type="submit" ${jobs.length&&documents.length?'':'disabled'}>Open project SWMS</button>
-        ${!jobs.length?'<p>An active job in Jobs is needed to start a SWMS.</p>':''}
+        </select>`}
+        ${canAssign?'<label><input type="checkbox" name="required" checked style="width:auto;min-height:0"> Required before work starts</label>':''}
+        <button type="submit" ${(!jobId||jobs.length)&&documents.length?'':'disabled'}>Continue to form</button>
+        ${jobId&&!jobs.length?'<p>Restore this project in Jobs to start another SWMS.</p>':''}
         ${!documents.length?'<p>The office needs to upload an approved SWMS PDF first.</p>':''}
-      </form></details>
+      </form>${template?'':'</details>'}`:'')+(template?'':`
       <h3>Saved by project</h3>
       ${jobId?'':'<label for="swms-project-search">Find a project</label><input id="swms-project-search" type="search" placeholder="Search project names">'}
-      <div id="swms-projects"></div>`;
+      <div id="swms-projects"></div>`);
 
     const search=panel.querySelector('#swms-project-search');
     const list=panel.querySelector('#swms-projects');
@@ -457,13 +468,23 @@ async function jobSwmsPage(jobId=null,projectFilter=''){
         </details>`).join('')||(query?'<p>No matching projects.</p>':'<p>No project SWMS yet.</p>');
     };
     if(search)search.oninput=renderProjects;
-    renderProjects();
-    list.onclick=event=>{
+    if(list)renderProjects();
+    if(list)list.onclick=event=>{
       const button=event.target.closest('[data-swms-id]');
       if(button)openJobSwms(Number(button.dataset.swmsId),jobId);
     };
     const form=$('#start-project-swms-form');
-    if(jobId&&jobs.length)form.elements.namedItem('project').value=jobId;
+    if(!form)return;
+    const project=form.elements.namedItem('project');
+    const name=form.elements.namedItem('projectName');
+    if(jobId&&jobs.length)project.value=jobId;
+    project.onchange=()=>{
+      const adding=project.value==='new';
+      $('#swms-new-project').hidden=!adding;
+      name.disabled=!adding;
+      name.required=adding;
+      if(adding)name.focus();
+    };
     form.onsubmit=async event=>{
       event.preventDefault();
       const button=form.querySelector('button');
@@ -471,7 +492,9 @@ async function jobSwmsPage(jobId=null,projectFilter=''){
       button.disabled=true;
       try{
         const data=new FormData(form);
-        const payload={jobId:Number(data.get('project')),documentId:Number(data.get('document')),required:data.has('required')};
+        const payload={documentId:Number(data.get('document')),required:data.has('required')};
+        if(data.get('project')==='new')payload.projectName=data.get('projectName');
+        else payload.jobId=Number(data.get('project'));
         const existing=rows.find(row=>row.job_id===payload.jobId&&row.document_id===payload.documentId);
         const endpoint=me.role==='manager'?'/job-swms':'/job-swms/start';
         const record=existing&&!payload.required?existing:await post(endpoint,payload);
@@ -513,7 +536,7 @@ async function openJobSwms(id,jobId){
     const current=record.versions[0];
     const own=record.signed.some(worker=>worker.user_id===me.id);
     const ready=['site','date','supervisor','emergency'].every(key=>record.details[key]);
-    panel.innerHTML=`<button class="alt" onclick="jobSwmsPage(${jobId||'null'},${record.job_id})">← Project SWMS</button>
+    panel.innerHTML=`<button class="alt" onclick="jobSwmsPage(${jobId||'null'},${record.job_id})">← Saved SWMS</button>
       <h2>${esc(record.title)}</h2><p>${esc(record.job)} · ${esc(record.status)}${record.required?' · Required before work starts':''}</p>
       <p><a href="/api/job-swms/${id}/master" target="_blank" rel="noopener">Open approved master SWMS PDF</a></p>
       <form id="job-swms-details"><h3>Site details</h3>

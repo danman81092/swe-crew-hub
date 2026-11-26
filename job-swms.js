@@ -65,7 +65,16 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       return {...row,status,version};
     }));
   }));
-  const start=db.transaction((jobId,documentId,required,userId)=>{
+  const start=db.transaction((jobId,documentId,required,userId,projectName)=>{
+    if(projectName!==undefined){
+      if(jobId!==undefined||typeof projectName!=='string')throw Error('Enter a project name.');
+      const name=projectName.trim().replace(/\s+/g,' ');
+      if(!name||name.length>200)throw Error('Enter a project name of up to 200 characters.');
+      const existing=db.prepare("SELECT id,active,name FROM catalog WHERE kind='job' ORDER BY active DESC,id").all()
+        .find(job=>job.name.trim().replace(/\s+/g,' ').toLowerCase()===name.toLowerCase());
+      if(existing&&!existing.active)throw Error('That project is archived. Ask the office to restore it.');
+      jobId=existing?.id??Number(db.prepare("INSERT INTO catalog(kind,name) VALUES ('job',?)").run(name).lastInsertRowid);
+    }
     if(!Number.isSafeInteger(jobId)||!Number.isSafeInteger(documentId))throw Error('Select a project and SWMS.');
     if(!db.prepare("SELECT id FROM catalog WHERE id=? AND kind='job' AND active=1").get(jobId??null))throw Error('Select an active job.');
     if(!db.prepare('SELECT id FROM swms_documents WHERE id=? AND deleted_at IS NULL').get(documentId??null))throw Error('Select an available SWMS.');
@@ -73,12 +82,12 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     return db.prepare('SELECT id FROM job_swms WHERE job_id=? AND document_id=?').get(jobId,documentId);
   });
   app.post('/api/job-swms',auth,manager,route((req,res)=>{
-    const {jobId,documentId,required}=req.body;
-    res.json(start.immediate(jobId,documentId,required===true,req.user.id));
+    const {jobId,documentId,required,projectName}=req.body;
+    res.json(start.immediate(jobId,documentId,required===true,req.user.id,projectName));
   }));
   app.post('/api/job-swms/start',auth,route((req,res)=>{
-    const {jobId,documentId}=req.body;
-    res.json(start.immediate(jobId,documentId,false,req.user.id));
+    const {jobId,documentId,projectName}=req.body;
+    res.json(start.immediate(jobId,documentId,false,req.user.id,projectName));
   }));
   app.get('/api/job-swms/:id',auth,route((req,res)=>{
     const row=assignment(req.params.id);
