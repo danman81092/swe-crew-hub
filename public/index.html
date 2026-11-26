@@ -539,6 +539,29 @@ function printJobSwms(record,version){
   if(tab.document.readyState==='complete')ready();else tab.addEventListener('load',ready,{once:true});
 }
 
+async function openSwmsPdf(button,url,title){
+  if(button.disabled)return;
+  button.disabled=true;
+  try{
+    const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
+    if(response.status===401)throw Error('Your Crew Hub session has expired. Reopen Crew Hub and sign in again.');
+    if(!response.ok||!response.headers.get('content-type')?.includes('application/pdf')){
+      throw Error('Could not load the SWMS PDF. Try again.');
+    }
+    if(!button.isConnected)return;
+    const download=document.createElement('a');
+    const objectUrl=URL.createObjectURL(await response.blob());
+    download.href=objectUrl;
+    download.download=(title.replace(/[^a-z0-9 _-]/gi,'').trim()||'SWMS')+'.pdf';
+    document.body.append(download);
+    download.click();
+    download.remove();
+    setTimeout(()=>URL.revokeObjectURL(objectUrl),60000);
+    if(button.isConnected)notify('Open the SWMS PDF from your downloads to review it.');
+  }catch(error){if(button.isConnected)notify(error.message,true)}
+  finally{button.disabled=false}
+}
+
 async function openJobSwms(id,jobId,fromNotifications=false){
   $('#screen').innerHTML='<section class="card"><div id="job-swms-record">Loading SWMS…</div></section>';
   const panel=$('#job-swms-record');
@@ -551,7 +574,7 @@ async function openJobSwms(id,jobId,fromNotifications=false){
     const ready=['site','date','supervisor','emergency'].every(key=>record.details[key]);
     panel.innerHTML=`<button class="alt" onclick="${fromNotifications?"go('notifications')":`jobSwmsPage(${jobId||'null'},${record.job_id})`}">← ${fromNotifications?'Notifications':'Saved SWMS'}</button>
       <h2>${esc(record.title)}</h2><p>${esc(record.job)} · ${esc(record.status)}${record.required?' · Required before work starts':''}</p>
-      <p><a href="/api/job-swms/${id}/master" target="_blank" rel="noopener">Open approved master SWMS PDF</a></p>
+      <p><button type="button" class="alt" id="job-swms-master">Download approved SWMS PDF</button></p>
       <form id="job-swms-details"><h3>Site details</h3>
       ${['site','date','supervisor','emergency','contractor'].map(key=>`<label for="swms-detail-${key}">${jobSwmsLabels[key]}${key==='contractor'?' (if applicable)':''}</label>
         ${record.details[key]?.includes('\n')
@@ -580,6 +603,7 @@ async function openJobSwms(id,jobId,fromNotifications=false){
       ${current&&manager?'<button class="alt" id="job-swms-print">Print / save sign-off PDF</button>':''}
       ${record.versions.length>1?`<h3>Previous versions</h3>${record.versions.slice(1).map(version=>`<details><summary>Version ${version.version} · Superseded · ${version.signed.length} signatures</summary>
         ${jobSwmsVersionHtml(record,version)}${manager?`<button class="alt" data-swms-print="${version.version}">Print / save sign-off PDF</button>`:''}</details>`).join('')}`:''}`;
+    $('#job-swms-master').onclick=event=>openSwmsPdf(event.currentTarget,'/api/job-swms/'+id+'/master',record.title);
     const details=$('#job-swms-details');
     for(const key of Object.keys(jobSwmsLabels))details.elements.namedItem(key).value=record.details[key]||(!current&&key==='date'?today():'');
     const saveForm=(form,save,message)=>{if(form)form.onsubmit=async event=>{
