@@ -546,7 +546,8 @@ async function openSwmsPdf(button,url,title){
     const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
     if(response.status===401)throw Error('Your Crew Hub session has expired. Reopen Crew Hub and sign in again.');
     if(!response.ok||!response.headers.get('content-type')?.includes('application/pdf')){
-      throw Error('Could not load the SWMS PDF. Try again.');
+      const failure=await response.json().catch(()=>null);
+      throw Error(failure?.error||'Could not load the SWMS PDF. Try again.');
     }
     if(!button.isConnected)return;
     const download=document.createElement('a');
@@ -571,7 +572,6 @@ async function openJobSwms(id,jobId,fromNotifications=false){
     const manager=me.role==='manager';
     const current=record.versions[0];
     const own=record.signed.some(worker=>worker.user_id===me.id);
-    const ready=['site','date','supervisor','emergency'].every(key=>record.details[key]);
     panel.innerHTML=`<button class="alt" onclick="${fromNotifications?"go('notifications')":`jobSwmsPage(${jobId||'null'},${record.job_id})`}">← ${fromNotifications?'Notifications':'Saved SWMS'}</button>
       <h2>${esc(record.title)}</h2><p>${esc(record.job)} · ${esc(record.status)}${record.required?' · Required before work starts':''}</p>
       <p><button type="button" class="alt" id="job-swms-master">Download approved SWMS PDF</button></p>
@@ -595,14 +595,14 @@ async function openJobSwms(id,jobId,fromNotifications=false){
         <select name="worker" id="job-swms-worker-select" required><option value="">Select worker</option>
         ${users.filter(user=>user.active&&(user.role==='employee'||user.id===me.id)&&!record.workers.some(worker=>worker.id===user.id)).map(user=>`<option value="${user.id}">${esc(user.name)}</option>`).join('')}</select>
         <button type="submit">Add worker</button></form>`:''}
-      ${ready&&!own?`<form id="job-swms-sign"><label for="job-swms-role">Your work role</label><input id="job-swms-role" name="role" maxlength="100" required>
+      ${!own?`<form id="job-swms-sign"><label for="job-swms-role">Your work role</label><input id="job-swms-role" name="role" maxlength="100" required>
         <label><input name="reviewed" type="checkbox" required style="width:auto;min-height:0"> I have read the master SWMS and this version’s site details and controls.</label>
         <canvas id="sig" class="signature" aria-label="Draw your signature"></canvas>
-        <button type="button" class="alt" onclick="clearSig()">Clear signature</button><button type="submit">Sign this version</button></form>`:''}
-      ${!ready?'<p>Save the site, work date, supervisor and emergency details before signing.</p>':''}
+        <button type="button" class="alt" onclick="clearSig()">Clear signature</button><button type="submit">Save and sign SWMS</button></form>`:''}
+      ${current&&(manager||own||record.workers.some(worker=>worker.id===me.id))?`<button type="button" class="alt" data-completed-swms="${current.version}">Download filled SWMS PDF</button>`:''}
       ${current&&manager?'<button class="alt" id="job-swms-print">Print / save sign-off PDF</button>':''}
       ${record.versions.length>1?`<h3>Previous versions</h3>${record.versions.slice(1).map(version=>`<details><summary>Version ${version.version} · Superseded · ${version.signed.length} signatures</summary>
-        ${jobSwmsVersionHtml(record,version)}${manager?`<button class="alt" data-swms-print="${version.version}">Print / save sign-off PDF</button>`:''}</details>`).join('')}`:''}`;
+        ${jobSwmsVersionHtml(record,version)}${manager?`<button type="button" class="alt" data-completed-swms="${version.version}">Download filled SWMS PDF</button>`:''}${manager?`<button class="alt" data-swms-print="${version.version}">Print / save sign-off PDF</button>`:''}</details>`).join('')}`:''}`;
     $('#job-swms-master').onclick=event=>openSwmsPdf(event.currentTarget,'/api/job-swms/'+id+'/master',record.title);
     const details=$('#job-swms-details');
     for(const key of Object.keys(jobSwmsLabels))details.elements.namedItem(key).value=record.details[key]||(!current&&key==='date'?today():'');
@@ -630,9 +630,13 @@ async function openJobSwms(id,jobId,fromNotifications=false){
     const signForm=$('#job-swms-sign');
     if(signForm){signature='';setupSig();}
     saveForm(signForm,data=>{
-      ensureSaved();
       if(!signature)throw Error('Draw your signature before signing.');
-      return post('/job-swms/'+id+'/sign',{version:record.version,role:data.get('role'),reviewed:data.get('reviewed')==='on',signature:$('#sig').toDataURL('image/png')});
+      return post('/job-swms/'+id+'/sign',{version:record.version,role:data.get('role'),reviewed:data.get('reviewed')==='on',
+        signature:$('#sig').toDataURL('image/png'),details:changed()?Object.fromEntries(new FormData(details)):undefined});
+    },'SWMS saved and signed');
+    panel.querySelectorAll('[data-completed-swms]').forEach(button=>{
+      const version=button.dataset.completedSwms;
+      button.onclick=()=>openSwmsPdf(button,`/api/job-swms/${id}/versions/${version}/pdf`,`${record.title} - ${record.job} - v${version}`);
     });
     if(manager&&current)$('#job-swms-print').onclick=()=>printJobSwms(record,current);
     panel.querySelectorAll('[data-swms-print]').forEach(button=>button.onclick=()=>printJobSwms(record,record.versions.find(version=>version.version===Number(button.dataset.swmsPrint))));

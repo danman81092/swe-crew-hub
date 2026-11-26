@@ -1,3 +1,5 @@
+import { completedSwmsPdf } from './swms-pdf.js';
+
 export const swmsFields = ['site','contractor','date','supervisor','emergency','hazards','controls'];
 
 export function registerJobSwms({app,db,auth,manager,fail}) {
@@ -111,6 +113,23 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     res.set({'Content-Disposition':'inline','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'"});
     res.type('application/pdf').send(Buffer.from(item.pdf,'base64'));
   }));
+  app.get('/api/job-swms/:id/versions/:version/pdf',auth,async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    try{
+      const row=assignment(req.params.id);
+      const version=db.prepare('SELECT version,details FROM job_swms_versions WHERE assignment_id=? AND version=?').get(row.id,req.params.version);
+      if(!version)return res.status(404).json({error:'SWMS version not found.'});
+      const source=db.prepare('SELECT pdf FROM swms_documents WHERE id=?').get(row.document_id);
+      const viewer=req.user.role==='manager'?req.user:{...req.user,role:'manager'};
+      if(req.user.role!=='manager'&&!pendingWorkers(row.id).some(worker=>worker.id===req.user.id)){
+        return res.status(403).json({error:'Only office staff and workers on this SWMS can download the completed PDF.'});
+      }
+      const document=await completedSwmsPdf(Buffer.from(source.pdf,'base64'),row.job,version.version,
+        JSON.parse(version.details),signatures(row.id,version.version,viewer));
+      if(!document)return res.status(422).json({error:'This PDF template does not have the supported SWMS fields.'});
+      res.type('application/pdf').send(Buffer.from(document));
+    }catch(error){fail(res,error)}
+  });
   const save=db.transaction((id,base,details,user)=>{
     const current=latest(id);
     if((current?.version||0)!==base)throw Error('Someone has updated this SWMS. Reopen it before saving.');
@@ -118,16 +137,21 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     if(current?.details===json)return;
     db.prepare('INSERT INTO job_swms_versions(assignment_id,version,details,saved_by) VALUES (?,?,?,?)').run(id,base+1,json,user);
   });
-  app.put('/api/job-swms/:id/details',auth,route((req,res)=>{
-    const row=assignment(req.params.id);
-    const {version,details}=req.body;
-    if(!Number.isInteger(version)||!details||Array.isArray(details))throw Error('Invalid SWMS details.');
+  function cleanDetails(details){
+    if(!details||typeof details!=='object'||Array.isArray(details))throw Error('Invalid SWMS details.');
     const fields=Object.fromEntries(swmsFields.map(key=>{
       const value=details[key]??'';
       if(typeof value!=='string'||value.length>3000)throw Error('Keep each field under 3,000 characters.');
       return [key,value.trim()];
     }));
     if(fields.date&&(!/^\d{4}-\d{2}-\d{2}$/.test(fields.date)||!Number.isFinite(Date.parse(fields.date))||new Date(fields.date).toISOString().slice(0,10)!==fields.date))throw Error('Choose a valid work date.');
+    return fields;
+  }
+  app.put('/api/job-swms/:id/details',auth,route((req,res)=>{
+    const row=assignment(req.params.id);
+    const {version,details}=req.body;
+    if(!Number.isInteger(version))throw Error('Invalid SWMS version.');
+    const fields=cleanDetails(details);
     save.immediate(row.id,version,fields,req.user.id);
     res.json({ok:true});
   }));
@@ -138,22 +162,25 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(row.id,user.id);
     res.json({ok:true});
   }));
-  const sign=db.transaction((id,version,role,signature,user)=>{
+  const sign=db.transaction((id,version,role,signature,user,details)=>{
+    const previous=latest(id);
+    if((previous?.version||0)!==version)throw Error('The SWMS has changed. Reopen and review the current version.');
+    if(details)save(id,version,details,user.id);
     const current=latest(id);
-    if(!current||current.version!==version)throw Error('The SWMS has changed. Reopen and review the current version.');
+    if(!current)throw Error('Complete the site details before signing.');
     if(!complete(JSON.parse(current.details)))throw Error('Complete the site, date, supervisor and emergency details first.');
     db.prepare('INSERT OR IGNORE INTO job_swms_signatures(assignment_id,version,user_id,name,role,signature) VALUES (?,?,?,?,?,?)')
-      .run(id,version,user.id,user.name,role,signature);
+      .run(id,current.version,user.id,user.name,role,signature);
     if(user.role==='employee')db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(id,user.id);
   });
   app.post('/api/job-swms/:id/sign',auth,route((req,res)=>{
     const row=assignment(req.params.id);
-    const {version,role,signature,reviewed}=req.body;
+    const {version,role,signature,reviewed,details}=req.body;
     if(reviewed!==true||!Number.isInteger(version)||typeof role!=='string'||!role.trim()||role.length>100||
        typeof signature!=='string'||signature.length>1000000||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature)){
       throw Error('Enter your work role and draw your signature.');
     }
-    sign.immediate(row.id,version,role.trim(),signature,req.user);
+    sign.immediate(row.id,version,role.trim(),signature,req.user,details===undefined?undefined:cleanDetails(details));
     res.json({ok:true});
   }));
 }
