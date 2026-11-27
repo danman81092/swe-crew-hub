@@ -142,9 +142,6 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       if(!version)return res.status(404).json({error:'SWMS version not found.'});
       const source=db.prepare('SELECT pdf FROM swms_documents WHERE id=?').get(row.document_id);
       const viewer=req.user.role==='manager'?req.user:{...req.user,role:'manager'};
-      if(req.user.role!=='manager'&&!pendingWorkers(row.id).some(worker=>worker.id===req.user.id)){
-        return res.status(403).json({error:'Only office staff and workers on this SWMS can download the completed PDF.'});
-      }
       const document=await completedSwmsPdf(Buffer.from(source.pdf,'base64'),row.job,version.version,
         JSON.parse(version.details),signatures(row.id,version.version,viewer),supervisorSignOff(row.id,version.version,true));
       if(!document)return res.status(422).json({error:'This PDF template does not have the supported SWMS fields.'});
