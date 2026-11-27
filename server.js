@@ -102,7 +102,7 @@ if(!db.pragma('table_info(swms_documents)').some(column=>column.name==='deleted_
   db.exec('ALTER TABLE swms_documents ADD COLUMN deleted_at TEXT');
 }
 
-app.get('/api/swms',auth,(req,res)=>{
+app.get('/api/swms',auth,manager,(req,res)=>{
   res.set('Cache-Control','no-store');
   res.json(db.prepare('SELECT id,title,created_at FROM swms_documents WHERE deleted_at IS NULL ORDER BY title COLLATE NOCASE,id DESC').all());
 });
@@ -124,7 +124,7 @@ app.delete('/api/swms/:id',auth,manager,(req,res)=>{
   res.json({ok:true});
 });
 
-app.get('/api/swms/:id/file',auth,(req,res)=>{
+app.get('/api/swms/:id/file',auth,manager,(req,res)=>{
   const document=db.prepare('SELECT title,pdf FROM swms_documents WHERE id=? AND deleted_at IS NULL').get(req.params.id);
   if(!document)return res.sendStatus(404);
   const filename=document.title.replace(/[^a-z0-9 _-]/gi,'').trim().slice(0,100)||('SWMS-'+req.params.id);

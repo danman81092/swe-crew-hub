@@ -38,8 +38,14 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     );
   `);
   const select='SELECT a.id,a.job_id,a.document_id,a.required,d.title,c.name AS job FROM job_swms a JOIN catalog c ON c.id=a.job_id JOIN swms_documents d ON d.id=a.document_id';
-  const assignment=id=>{
-    const row=db.prepare(select+' WHERE a.id=?').get(id);
+  const assignedToViewer=`(EXISTS (
+    SELECT 1 FROM job_swms_workers w WHERE w.assignment_id=a.id AND w.user_id=?
+  ) OR ? = (SELECT json_extract(v.details,'$.supervisorId') FROM job_swms_versions v
+    WHERE v.assignment_id=a.id ORDER BY v.version DESC LIMIT 1))`;
+  const assignment=(id,viewer)=>{
+    const row=viewer.role==='manager'
+      ?db.prepare(select+' WHERE a.id=?').get(id)
+      :db.prepare(select+' WHERE a.id=? AND '+assignedToViewer).get(id,viewer.id,viewer.id);
     if(!row)throw Error('Assigned SWMS not found.');
     return row;
   };
@@ -72,18 +78,21 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     try{fn(req,res)}catch(error){fail(res,error)}
   };
   app.get('/api/job-swms',auth,route((req,res)=>{
-    const rows=db.prepare(select+' ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE').all();
+    const order=' ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE';
+    const rows=req.user.role==='manager'?db.prepare(select+order).all()
+      :db.prepare(select+' WHERE '+assignedToViewer+order).all(req.user.id,req.user.id);
     res.json(rows.map(row=>{
-      const {status,version}=summary(row,req.user);
-      return {...row,status,version};
+      const {status,version,signed,details,supervisorSigned}=summary(row,req.user);
+      const signedByMe=signed.some(worker=>worker.user_id===req.user.id)&&
+        (details.supervisorId!==req.user.id||Boolean(supervisorSigned));
+      const previouslySigned=Boolean(db.prepare(`SELECT 1 FROM job_swms_signatures
+        WHERE assignment_id=? AND user_id=? AND version<? LIMIT 1`).get(row.id,req.user.id,version));
+      return {...row,status,version,signedByMe,previouslySigned};
     }));
   }));
   app.get('/api/job-swms/notifications',auth,route((req,res)=>{
-    const rows=db.prepare(select+` WHERE EXISTS (
-      SELECT 1 FROM job_swms_workers w WHERE w.assignment_id=a.id AND w.user_id=?
-    ) OR ? = (SELECT json_extract(v.details,'$.supervisorId') FROM job_swms_versions v
-      WHERE v.assignment_id=a.id ORDER BY v.version DESC LIMIT 1)
-    ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE`).all(req.user.id,req.user.id);
+    const rows=db.prepare(select+' WHERE '+assignedToViewer+
+      ' ORDER BY c.name COLLATE NOCASE,d.title COLLATE NOCASE').all(req.user.id,req.user.id);
     res.json(rows.flatMap(row=>{
       const {details,missing,supervisorSigned}=summary(row,req.user);
       const supervisor=details.supervisorId===req.user.id&&!supervisorSigned;
@@ -111,20 +120,16 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     const {jobId,documentId,required,projectName}=req.body;
     res.json(start.immediate(jobId,documentId,required===true,req.user.id,projectName));
   }));
-  app.post('/api/job-swms/start',auth,route((req,res)=>{
-    const {jobId,documentId,projectName}=req.body;
-    res.json(start.immediate(jobId,documentId,false,req.user.id,projectName));
-  }));
   app.get('/api/job-swms/:id',auth,route((req,res)=>{
-    const row=assignment(req.params.id);
+    const row=assignment(req.params.id,req.user);
     const record=summary(row,req.user);
     const versions=db.prepare('SELECT version,details,saved_at FROM job_swms_versions WHERE assignment_id=? ORDER BY version DESC').all(row.id)
       .map(item=>({...item,details:JSON.parse(item.details),signed:signatures(row.id,item.version,req.user)}));
-    const supervisors=db.prepare('SELECT name FROM users WHERE active=1 ORDER BY name COLLATE NOCASE').all();
+    const supervisors=req.user.role==='manager'?db.prepare('SELECT name FROM users WHERE active=1 ORDER BY name COLLATE NOCASE').all():[];
     res.json({...record,versions,supervisors});
   }));
   app.get('/api/job-swms/:id/master',auth,route((req,res)=>{
-    const row=assignment(req.params.id);
+    const row=assignment(req.params.id,req.user);
     const item=db.prepare('SELECT d.pdf FROM job_swms a JOIN swms_documents d ON d.id=a.document_id WHERE a.id=?').get(row.id);
     res.set({'Content-Disposition':'inline','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'"});
     res.type('application/pdf').send(Buffer.from(item.pdf,'base64'));
@@ -132,7 +137,7 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
   app.get('/api/job-swms/:id/versions/:version/pdf',auth,async(req,res)=>{
     res.set('Cache-Control','no-store');
     try{
-      const row=assignment(req.params.id);
+      const row=assignment(req.params.id,req.user);
       const version=db.prepare('SELECT version,details FROM job_swms_versions WHERE assignment_id=? AND version=?').get(row.id,req.params.version);
       if(!version)return res.status(404).json({error:'SWMS version not found.'});
       const source=db.prepare('SELECT pdf FROM swms_documents WHERE id=?').get(row.document_id);
@@ -167,8 +172,8 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     else if(fields.supervisor&&fields.supervisor!==previous?.supervisor)throw Error('Select a site supervisor from the Crew Hub account list.');
     return fields;
   }
-  app.put('/api/job-swms/:id/details',auth,route((req,res)=>{
-    const row=assignment(req.params.id);
+  app.put('/api/job-swms/:id/details',auth,manager,route((req,res)=>{
+    const row=assignment(req.params.id,req.user);
     const {version,details}=req.body;
     if(!Number.isInteger(version))throw Error('Invalid SWMS version.');
     const fields=cleanDetails(details,JSON.parse(latest(row.id)?.details||'{}'));
@@ -176,7 +181,8 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     res.json({ok:true});
   }));
   app.post('/api/job-swms/:id/workers',auth,manager,route((req,res)=>{
-    const row=assignment(req.params.id);
+    const row=assignment(req.params.id,req.user);
+    if(!complete(JSON.parse(latest(row.id)?.details||'{}')))throw Error('Save the site, date and supervisor before sending this SWMS.');
     const user=db.prepare("SELECT id FROM users WHERE id=? AND active=1 AND (role='employee' OR id=?)").get(req.body.userId??null,req.user.id);
     if(!user)throw Error('Select an active worker.');
     db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(row.id,user.id);
@@ -194,12 +200,13 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
     if(user.role==='employee'||JSON.parse(current.details).supervisorId===user.id)db.prepare('INSERT OR IGNORE INTO job_swms_workers VALUES (?,?)').run(id,user.id);
   });
   app.post('/api/job-swms/:id/sign',auth,route((req,res)=>{
-    const row=assignment(req.params.id);
+    const row=assignment(req.params.id,req.user);
     const {version,role,signature,reviewed,details}=req.body;
     if(reviewed!==true||!Number.isInteger(version)||typeof role!=='string'||!role.trim()||role.length>100||
        typeof signature!=='string'||signature.length>1000000||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature)){
       throw Error('Enter your work role and draw your signature.');
     }
+    if(details!==undefined&&req.user.role!=='manager')return res.status(403).json({error:'Only the office can edit SWMS details.'});
     sign.immediate(row.id,version,role.trim(),signature,req.user,details===undefined?undefined:cleanDetails(details,JSON.parse(latest(row.id)?.details||'{}')));
     res.json({ok:true});
   }));
@@ -215,7 +222,7 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
       .run(id,version,user.id,user.name,signature);
   });
   app.post('/api/job-swms/:id/supervisor-sign',auth,route((req,res)=>{
-    const row=assignment(req.params.id);
+    const row=assignment(req.params.id,req.user);
     const {version,signature,reviewed}=req.body;
     if(reviewed!==true||!Number.isInteger(version)||typeof signature!=='string'||signature.length>1000000||
        !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature))throw Error('Confirm your review and draw your supervisor signature.');
