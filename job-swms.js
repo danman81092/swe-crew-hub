@@ -201,7 +201,8 @@ export function registerJobSwms({app,db,auth,manager,fail}) {
   });
   app.post('/api/job-swms/:id/sign',auth,route((req,res)=>{
     const row=assignment(req.params.id,req.user);
-    const {version,role,signature,reviewed,details}=req.body;
+    const {version,signature,reviewed,details}=req.body;
+    const role=req.user.role==='employee'?'Worker':req.body.role;
     if(reviewed!==true||!Number.isInteger(version)||typeof role!=='string'||!role.trim()||role.length>100||
        typeof signature!=='string'||signature.length>1000000||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature)){
       throw Error('Enter your work role and draw your signature.');
