@@ -622,7 +622,7 @@ async function openJobSwms(id,jobId,fromNotifications=false){
         <select name="worker" id="job-swms-worker-select" required><option value="">Select worker</option>
         ${users.filter(user=>user.active&&(user.role==='employee'||user.id===me.id)&&!record.workers.some(worker=>worker.id===user.id)).map(user=>`<option value="${user.id}">${esc(user.name)}</option>`).join('')}</select>
         <button type="submit">Send for signing</button></form>`:''}
-      ${(manager||ready)&&(!own||signingAsSupervisor)?`<form id="job-swms-sign" ${signingAsSupervisor?'data-supervisor-sign':''}><h3>${signingAsSupervisor?'Supervisor signature':'General signature'}</h3>
+      ${ready&&(!manager||fromNotifications)&&(!own||signingAsSupervisor)?`<form id="job-swms-sign" ${signingAsSupervisor?'data-supervisor-sign':''}><h3>${signingAsSupervisor?'Supervisor signature':'General signature'}</h3>
         ${supervisorPending&&!own?'<p>Save your general signature first. You’ll then be prompted to sign as supervisor.</p>':''}
         ${signingAsSupervisor?'':'<label for="job-swms-role">Your work role</label><input id="job-swms-role" name="role" maxlength="100" required>'}
         <label><input name="reviewed" type="checkbox" required style="width:auto;min-height:0"> I have read the master SWMS and this version’s site details and controls.</label>
